@@ -1,0 +1,59 @@
+[build-system]
+requires = ["uv_build>=0.12.1,<0.13.0"]
+build-backend = "uv_build"
+
+[project]
+name = "mjlab"
+version = "1.6.0"
+description = "Simulation, terrain, and Viser viewer used by the gen0 Walter PD controller."
+requires-python = ">=3.10,<3.14"
+dependencies = [
+  "imageio-ffmpeg",
+  "mediapy>=1.2.7",
+  "mjviser>=0.0.14",
+  "mujoco~=3.11.0",
+  "mujoco-warp~=3.11.0",
+  "numpy",
+  "prettytable",
+  "scipy>=1.15",
+  "torch==2.14.0",
+  "trimesh>=4.8.3",
+  "tyro>=1.0.1",
+  "typing_extensions",
+  "viser>=1.0.27",
+  "warp-lang>=1.14.0",
+]
+
+[project.optional-dependencies]
+cu128 = ["torch==2.14.0"]
+cpu = ["torch==2.14.0"]
+
+[tool.uv]
+conflicts = [
+  [{extra = "cu128"}, {extra = "cpu"}],
+]
+
+[tool.uv.sources]
+warp-lang = { index = "nvidia", marker = "sys_platform != 'darwin'" }
+torch = [
+  { index = "pytorch-cu128", extra = "cu128", marker = "sys_platform != 'darwin'" },
+  { index = "pytorch-cpu", extra = "cpu", marker = "sys_platform != 'darwin'" },
+]
+
+[[tool.uv.index]]
+url = "https://pypi.org/simple"
+
+[[tool.uv.index]]
+name = "nvidia"
+url = "https://pypi.nvidia.com/"
+explicit = true
+
+[[tool.uv.index]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true

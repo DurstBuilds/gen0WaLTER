@@ -1,0 +1,4 @@
+Create a directory src/walter_rl/assets/motor_models. This will contain the motor assets to be used in this project and future projects. I should be able to easily reference the data from these asset folders to accurately model and simulate the custom motor models. 
+#
+Search the internet and find the motor constants, rated torque and peak torque, rated and max speeds. Find or calculate simple torque speed curves that will control the function of the motors in simulation.
+#Motors
