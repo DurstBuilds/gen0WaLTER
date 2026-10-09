@@ -18,6 +18,7 @@ from mjlab.tasks.velocity.mdp import UniformVelocityCommandCfg
 from mjlab.terrains.config import random_rough
 from mjlab.terrains.terrain_generator import TerrainGeneratorCfg
 
+from walter_rl.assets.payloads import attach_payload
 from walter_rl.assets.walter_fs.walter_constants import get_spec, get_walter_fs_robot_cfg
 from walter_rl.control.full_body_pd.gains import FullBodyPdGains, default_gains
 from walter_rl.tasks.velocity.config.walter_fs.env_cfgs import (
@@ -49,11 +50,14 @@ def make_pd_env(
   lock_speed: float | None = None,
   lock_heading: float = 0.0,
   episode_length_s: float | None = None,
+  payload: str | None = None,
 ) -> ManagerBasedRlEnv:
   """Build a Walter env whose action vector includes the waist hold."""
   chosen = "rough" if easy_rough else task
   cfg = _CFG_FOR_TASK[chosen](play=play)
   _add_waist_lock(cfg, gains if gains is not None else default_gains())
+  if payload is not None:
+    _weld_payload(cfg, payload)
   cfg.scene.num_envs = num_envs
   if episode_length_s is not None:
     cfg.episode_length_s = episode_length_s
@@ -67,6 +71,19 @@ def make_pd_env(
   if play:
     _drop_play_overhead(cfg)
   return ManagerBasedRlEnv(cfg, device=device or _default_device())
+
+
+def _weld_payload(cfg: ManagerBasedRlEnvCfg, name: str) -> None:
+  """Weld a registered payload onto the robot after the waist spec is built."""
+  robot = cfg.scene.entities["robot"]
+  base_spec = robot.spec_fn
+
+  def spec_with_payload() -> mujoco.MjSpec:
+    spec = base_spec()
+    attach_payload(spec, name)
+    return spec
+
+  robot.spec_fn = spec_with_payload
 
 
 def _default_device() -> str:

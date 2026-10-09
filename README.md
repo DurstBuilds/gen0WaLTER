@@ -6,16 +6,18 @@
 
 **gen0WaLTER** is a simulation package for the full-scale WaLTER robot. It drives the robot with a classical full-body PD controller inside MuJoCo scenes for flat ground, rough terrain, and stairs. The package version is **0.1.0**.
 
-WaLTER is a wheeled leg platform: four hip joints, four continuous knee joints, eight driven wheels, and a waist (`head_joint`) held at zero. Balancing, speed tracking, and skid steering are closed in code. A forward-speed integral counts meters the body falls behind `lin_vel_x`. Once that distance crosses a threshold, the knees spin about +Y and the legs climb the stall.
+WaLTER is a wheeled leg platform: four hip joints, four continuous knee joints, eight driven wheels, and a waist (`head_joint`) held at zero. Balancing, speed tracking, and skid steering are closed in code. A forward-speed integral counts meters the body falls behind `lin_vel_x`. Once that distance crosses a threshold, the knees spin about +Y, the wheels hold `tumble.wheel_speed`, and the legs climb the stall.
 
 The primary use case is interactive playback. `scripts/play_pd.py` builds one of the four scenes and steps `FullBodyPdPolicy` in the Viser browser viewer or MuJoCo's native viewer. Velocity-task observations, rewards, and a terrain curriculum live beside the controller so the same robot description can support later reinforcement-learning work. That control package is not registered as an RL task.
+
+How an MJCF file becomes a joint torque is in [`SIMULATION.md`](SIMULATION.md). Masses and link lengths are in [`src/walter_rl/assets/walter_fs/README.md`](src/walter_rl/assets/walter_fs/README.md).
 
 ## Key Features
 
 - Full-body PD on hips, knees, wheels, and the waist, with gains collected in one dataclass file.
 - Pitch leveling by splaying the downhill hips, and roll leveling by extending the inner legs.
 - Wheel velocity tracking: `full_speed_command` requests the motor's maximum wheel rate, with proportional speed error on top, plus a skid-steer yaw loop.
-- Integral tumble: missed forward distance spins every knee about +Y between `threshold` and `release`, then the knees settle forward onto the roll pose. The Viser motors tab draws the state as **lin vel integral (m)**.
+- Integral tumble: missed forward distance spins every knee about +Y between `threshold` and `release`, and holds every wheel at `tumble.wheel_speed`. The knees then settle forward onto the roll pose while speed tracking resumes. The Viser motors tab draws the state as **lin vel integral (m)**.
 - Four scenes: `flat`, `rough`, `rough-test`, and `stairs`, including a shortened rough grid with taller stairs.
 - Checked-in full-scale MJCF (`walter_fs.xml`), with generator motors stripped and CubeMars DC motor actuators attached.
 - Actuator datasheets and torque-speed curves in `motor_models`. Details are in [`src/walter_rl/assets/motor_models/README.md`](src/walter_rl/assets/motor_models/README.md).
@@ -73,13 +75,14 @@ uv run python scripts/play_pd.py --task rough --viewer viser
 uv run python scripts/play_pd.py --task rough-test --viewer viser
 uv run python scripts/play_pd.py --task stairs --viewer native
 uv run python scripts/play_pd.py --task flat --num-envs 4
+uv run python scripts/play_pd.py --task flat --payload rider
 ```
 
 In the Viser **Twist** folder:
 
 1. Check **Enable** so the sliders override the sampled velocity command.
 2. Set **lin_vel_x** for forward speed and **ang_vel_z** for yaw rate. Lateral speed is locked at zero.
-3. Leave **Tank Mode** checked to apply **hip_angle** and **knee_angle**. Unchecked, both commands are zero and the sliders keep their values. The knee servo uses `tank_actuator_kp` and `tank_actuator_kd` while the box is checked.
+3. Leave **Tank Mode** checked to apply **hip_angle** and **knee_angle**. Unchecked, both commands are zero and the sliders keep their values. **hip_angle** is degrees; positive points the front hips forward and the rear hips backward. **knee_angle** is degrees and shifts the knee zero; positive lowers the front inner wheels. With Tank Mode on, the rear zero moves the other way, so positive raises the rear inner wheels. The knee servo uses `tank_actuator_kp` and `tank_actuator_kd` while the box is checked.
 4. Leave **Tumbling** checked so the stall integral runs. The motors tab shows **lin vel integral (m)**. Unchecked, the integral is cleared and the knees stay on the roll pose.
 5. Leave **Orientation** checked to level pitch and roll. Unchecked, those errors are treated as zero.
 6. **Rated torque cap** and **Rated speed cap** hold the DC motors on the continuous ratings. Both start unchecked, so the peak torque envelope and the no-load speed corner stay in use.
@@ -110,6 +113,7 @@ There is no `.env` file. Behavior comes from CLI flags, `gains.py`, and two envi
 | `--task` | `flat` | `flat`, `rough`, `rough-test`, `stairs` |
 | `--num-envs` | `1` | Number of parallel environments |
 | `--viewer` | `viser` | `viser` (browser) or `native` (MuJoCo passive viewer) |
+| `--payload` | none | Rigid mass welded to the torso top. `rider` is a 75 kg seated human. |
 
 | Task | Scene |
 | --- | --- |
@@ -127,15 +131,15 @@ Edit `src/walter_rl/control/full_body_pd/gains.py`. Each nested dataclass is one
 | Group | Role | Notable defaults |
 | --- | --- | --- |
 | `PitchGains` | Level torso pitch with hip splay | `kp=6`, `kd=0.4`, actuator `800 / 100` |
-| `RollGains` | Drop the downhill inner wheels | `kp=8`, `kd=0.5`, `q_max=π/2`, actuator `250 / 30` |
+| `RollGains` | Drop the downhill inner wheels | `kp=8`, `kd=0.5`, `q_max=π/2`, actuator `250 / 50`, tank actuator `250 / 50` |
 | `VelocityGains` | Track forward speed on all eight wheels | `kp=15`, `full_speed_command=10` m/s, `wheel_radius=0.10`, extra speed clip `50` rad/s |
 | `YawRateGains` | Skid-steer from `ang_vel_z` | `kp=5`, half-width `0.32` m, yaw limit `2.5` rad/s |
-| `TumbleGains` | Integrate missed forward distance, then spin the knees | `threshold=0.6` m, `release=0.4` m, `cap=2.5` m, `leak=1` /s, `min_forward_cmd=0.9` m/s, `min_speed_error=0.6` m/s, `rate=3` rad/s |
+| `TumbleGains` | Integrate missed forward distance, then spin the knees | `threshold=0.2` m, `release=0.1` m, `cap=0.5` m, `leak=2.5` /s, `min_forward_cmd=0.2` m/s, `min_speed_error=0.6` m/s, `rate=3` rad/s, `wheel_speed=0` rad/s |
 | `WaistGains` | Hold `head_joint` at zero | `kp=2000`, `kd=50`, effort `288` N·m |
 
 `sign` is `+1` or `-1`. Flip it if that loop runs away.
 
-`make_pd_env` also accepts `device`, `gains`, `easy_rough` (one 2–4 cm rough tile), `lock_speed`, `lock_heading`, and `episode_length_s`.
+`make_pd_env` also accepts `device`, `gains`, `easy_rough` (one 2–4 cm rough tile), `lock_speed`, `lock_heading`, `episode_length_s`, and `payload` (a name from `walter_rl.assets.payloads`, or none).
 
 ### Integral tumble
 
@@ -147,7 +151,9 @@ Each control step reads body-frame forward speed, `v_x`:
 - Otherwise the state leaks toward zero as `lag * exp(-leak * dt)`. `leak` is in 1/s.
 - The state is clamped at `cap`, so a long stall cannot leave a large tail. Keep `cap` above `threshold`.
 
-A hysteresis gate reads that state after the update. Tumbling turns on above `threshold` and stays on until the integral falls below `release`. While it is on, every knee reference is captured at the measured angle and then advances at `rate` about +Y. Positive +Y drops the front wheel and lifts the rear. The knee position servo remains the inner loop. Tumble only replaces the roll angle.
+A hysteresis gate reads that state after the update. Tumbling turns on above `threshold` and stays on until the integral falls below `release`. While it is on, every knee reference is captured at the measured angle and then advances at `rate` about +Y. Positive +Y drops the front wheel and lifts the rear. The knee position servo remains the inner loop. Tumble replaces the roll angle and, while the gate is on, the wheel commands.
+
+Every wheel is written to `tumble.wheel_speed` for that interval. The default is 0 rad/s. Positive matches a positive forward command. Speed tracking and skid steering resume as soon as the gate turns off, including while the knees settle.
 
 After release, each knee continues forward at `rate` until it reaches the roll pose on the revolution latched from the spin reference. The latch is taken when tumbling ends, so a shin that passes the pose stays on that turn. Unchecking **Tumbling** clears the integral, the spin reference, and the settle. An episode reset does the same.
 
@@ -164,6 +170,8 @@ After release, each knee continues forward at `rate` until it reaches the roll p
 gen0WaLTER/
 ├── pyproject.toml
 ├── uv.lock
+├── README.md
+├── SIMULATION.md
 ├── scripts/
 │   └── play_pd.py
 ├── src/walter_rl/
@@ -171,7 +179,11 @@ gen0WaLTER/
 │   ├── assets/
 │   │   ├── motor_models/
 │   │   │   └── README.md
+│   │   ├── payloads/
+│   │   │   ├── __init__.py
+│   │   │   └── rider.xml
 │   │   └── walter_fs/
+│   │       ├── README.md
 │   │       ├── walter_constants.py
 │   │       └── walter_fs.xml
 │   ├── control/full_body_pd/
@@ -206,15 +218,18 @@ gen0WaLTER/
 - **`pyproject.toml`** — Package `walter_rl` 0.1.0. The only dependency is the local `mjlab` checkout.
 - **`uv.lock`** — Locked dependency graph, including PyTorch, MuJoCo, Warp, and Viser.
 - **`scripts/play_pd.py`** — CLI entry point. Builds a play environment, wraps it in `FullBodyPdPolicy`, and runs Viser or the native viewer.
+- **`SIMULATION.md`** — Path from the MJCF through mjlab and MuJoCo Warp to a DC-motor torque and the PD loops.
 - **`src/walter_rl/assets/walter_fs/walter_fs.xml`** — Checked-in full-scale MJCF produced by `generate-walter --fs`.
+- **`src/walter_rl/assets/walter_fs/README.md`** — Mass table, link lengths, and which CubeMars motor drives each joint.
 - **`src/walter_rl/assets/motor_models/`** — CubeMars actuator datasheets and output-side torque-speed curves. See [`src/walter_rl/assets/motor_models/README.md`](src/walter_rl/assets/motor_models/README.md) for the catalog, curve, and how to add a motor.
-- **`src/walter_rl/assets/walter_fs/walter_constants.py`** — Loads that MJCF, limits hips to ±70°, replaces wheel contact parameters, adds belly and leg contact bumps plus a torso IMU, strips generator motors, and attaches the hip, knee, and wheel motors from `motor_models`.
+- **`src/walter_rl/assets/payloads/`** — Rigid masses welded to the torso for play. `rider` is the 75 kg seated human selected by `--payload rider`.
+- **`src/walter_rl/assets/walter_fs/walter_constants.py`** — Loads that MJCF, limits hips to ±70°, replaces wheel contact parameters, adds tire and spoke visuals, adds belly and leg contact bumps plus a torso IMU, strips generator motors, and attaches the hip, knee, and wheel motors from `motor_models`.
 - **`src/walter_rl/control/full_body_pd/gains.py`** — Tunable PD numbers. This is the file to edit when a loop oscillates or runs away.
-- **`src/walter_rl/control/full_body_pd/controller.py`** — `FullBodyPdController` writes the action vector: pitch hips, roll knees, integral tumble override, wheel speeds, and a zero waist command.
+- **`src/walter_rl/control/full_body_pd/controller.py`** — `FullBodyPdController` writes the action vector: pitch hips, roll knees, integral tumble override, wheel speeds, and a zero waist command. Tank Mode flips the rear knee zero. While tumbling, every wheel holds `tumble.wheel_speed`.
 - **`src/walter_rl/control/full_body_pd/policy.py`** — Viewer adapter. `__call__` drops the observation and returns `controller.act()`. `reset` clears the tumble integral.
 - **`src/walter_rl/control/full_body_pd/env.py`** — `make_pd_env` clones a velocity scene, stiffens the hip and knee servos, adds the waist position actuator, and can lock the twist command.
 - **`src/walter_rl/tasks/velocity/config/walter_fs/env_cfgs.py`** — Flat, rough, rough-test, and stairs `ManagerBasedRlEnvCfg` builders: actions, commands, sensors, rewards, terminations, and play mode.
-- **`src/walter_rl/tasks/velocity/mdp/rewards.py`** — WaLTER rewards: XY velocity tracking that does not punish climb `vz`, ride height, head level, wheel-wheel contact, and gated knee tumble.
+- **`src/walter_rl/tasks/velocity/mdp/rewards.py`** — WaLTER rewards: XY velocity tracking, climb `vz`, forward drive, ride height, head level, wheel-wheel contact, and terrain-gated knee tumble (forward spin rewarded, reverse spin and flat-ground waste penalized).
 - **`src/walter_rl/tasks/velocity/mdp/observations.py`** — Finite-safe IMU, joint, and height-scan terms, plus sine/cosine knee angles for joints that can wind through full turns.
 - **`src/walter_rl/tasks/velocity/mdp/curriculums.py`** — `terrain_levels_hold_max` promotes by progress along the commanded direction and stays on the hardest row once it is cleared.
 - **`mjlab/`** — Vendored simulation library (version 1.6.0 in this tree): manager-based RL env, MuJoCo Warp sim, terrain generator, velocity command with the Viser joystick, and the Viser and native viewers.
@@ -232,9 +247,9 @@ The code splits into three layers.
 **Controller.** `FullBodyPdController.act()` fills one action row per environment:
 
 1. Pitch PD on `projected_gravity_b.x` swings the low-end hips outward from vertical, then adds the joystick hip angle.
-2. Roll PD on `projected_gravity_b.y` folds the downhill knees until the inner wheel is straight down.
-3. The stall integral adds `lin_vel_x - v_x` while the forward command and the speed error are both above their floors, and leaks toward zero otherwise. Above `tumble.threshold` every knee tracks a `+Y` spin at `tumble.rate`. Below `tumble.release` the knees settle forward onto the roll pose on the latched turn. See [Integral tumble](#integral-tumble).
-4. Wheels scale `lin_vel_x` so `full_speed_command` requests the motor's maximum wheel rate, add proportional speed error, and add a differential from the yaw-rate loop.
+2. Roll PD on `projected_gravity_b.y` folds the downhill knees until the inner wheel is straight down. Tank Mode flips the rear knee zero, so a positive **knee_angle** raises the rear inner wheels.
+3. The stall integral adds `lin_vel_x - v_x` while the forward command and the speed error are both above their floors, and leaks toward zero otherwise. Above `tumble.threshold` every knee tracks a `+Y` spin at `tumble.rate`, and every wheel holds `tumble.wheel_speed`. Below `tumble.release` the knees settle forward onto the roll pose on the latched turn while the speed and yaw loops run again. See [Integral tumble](#integral-tumble).
+4. Wheels scale `lin_vel_x` so `full_speed_command` requests the motor's maximum wheel rate, add proportional speed error, and add a differential from the yaw-rate loop. The tumble gate replaces that command with `tumble.wheel_speed`.
 5. The waist column is written to zero.
 
 `FullBodyPdPolicy` matches the viewer policy protocol (`reset` and `__call__`). Simulation steps run in PyTorch on the device chosen by `make_pd_env`. The native viewer copies one environment's state back to CPU `MjData` for MuJoCo's passive window. Viser renders through `mjviser`.

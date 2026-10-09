@@ -123,7 +123,8 @@ class UniformVelocityCommand(CommandTerm):
     self.metrics["error_vel_yaw"] = torch.zeros(self.num_envs, device=self.device)
     # Radians. Positive points the front hips forward and the rear hips back.
     self.hip_angle = torch.zeros(self.num_envs, device=self.device)
-    # Radians. Same front/rear signs as hip_angle: positive lowers every inner wheel.
+    # Radians. Positive lowers the front inner wheels. Tank Mode flips the
+    # rear zero, so the same command raises the rear inner wheels.
     self.knee_angle = torch.zeros(self.num_envs, device=self.device)
     # Latched with the pose sliders. The knee servo reads this each action.
     self.tank_mode = False
@@ -402,8 +403,9 @@ class UniformVelocityCommand(CommandTerm):
         "speed. Unchecked, that corner is the no-load speed.\n\n"
         "**hip_angle** is degrees. Positive points the front hips forward "
         "and the rear hips backward.\n\n"
-        "**knee_angle** is degrees and shifts the knee zero. Positive uses "
-        "the same signs as the hips and lowers the inner wheel of every leg."
+        "**knee_angle** is degrees and shifts the knee zero. Positive lowers "
+        "the front inner wheels. With **Tank Mode** on, the rear zero moves "
+        "the other way, so positive raises the rear inner wheels."
       )
 
     _bind_axis_hotkeys(server, enabled, sliders)

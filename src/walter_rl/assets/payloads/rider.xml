@@ -1,0 +1,30 @@
+<mujoco model="rider">
+  <compiler angle="radian"/>
+
+  <!-- Seated adult, 75 kg, visual only. The parent weld carries the inertia.
+       Trunk 32 (pelvis 12 + chest 20), thighs 10 each, shanks and feet 5.2
+       each, head 5, upper arms 2 each, forearms and hands 1.8 each. -->
+  <default>
+    <geom contype="0" conaffinity="0"/>
+  </default>
+
+  <worldbody>
+    <body name="rider">
+      <geom name="rider_pelvis" type="capsule" pos="0 0 0.1" quat="0.707107 -0.707107 0 0" size="0.09 0.09" mass="12" rgba="0.2 0.22 0.26 1"/>
+      <geom name="rider_chest" type="capsule" pos="-0.04 0 0.42" quat="0.995133 0 -0.098538 0" size="0.12 0.204" mass="20" rgba="0.27 0.4 0.62 1"/>
+      <geom name="rider_head" type="sphere" pos="-0.11 0 0.77" size="0.11" mass="5" rgba="0.87 0.72 0.58 1"/>
+
+      <geom name="rider_thigh_left" type="capsule" pos="0.23 0.125 0.08" quat="0.655336 -0.053816 0.753418 0" size="0.07 0.2127" mass="10" rgba="0.2 0.22 0.26 1"/>
+      <geom name="rider_thigh_right" type="capsule" pos="0.23 -0.125 0.08" quat="0.655336 0.053816 0.753418 0" size="0.07 0.2127" mass="10" rgba="0.2 0.22 0.26 1"/>
+      <geom name="rider_shank_left" type="capsule" pos="0.47 0.15 -0.115" quat="0.094537 -0.314811 0.944434 0" size="0.048 0.168" mass="4" rgba="0.2 0.22 0.26 1"/>
+      <geom name="rider_shank_right" type="capsule" pos="0.47 -0.15 -0.115" quat="0.094537 0.314811 0.944434 0" size="0.048 0.168" mass="4" rgba="0.2 0.22 0.26 1"/>
+      <geom name="rider_foot_left" type="capsule" pos="0.6 0.16 -0.315" quat="0.652556 0 0.75774 0" size="0.04 0.1011" mass="1.2" rgba="0.15 0.15 0.16 1"/>
+      <geom name="rider_foot_right" type="capsule" pos="0.6 -0.16 -0.315" quat="0.652556 0 0.75774 0" size="0.04 0.1011" mass="1.2" rgba="0.15 0.15 0.16 1"/>
+
+      <geom name="rider_upper_arm_left" type="capsule" pos="0.035 0.2 0.45" quat="0.291448 -0.219096 0.931158 0" size="0.045 0.1566" mass="2" rgba="0.27 0.4 0.62 1"/>
+      <geom name="rider_upper_arm_right" type="capsule" pos="0.035 -0.2 0.45" quat="0.291448 0.219096 0.931158 0" size="0.045 0.1566" mass="2" rgba="0.27 0.4 0.62 1"/>
+      <geom name="rider_forearm_left" type="capsule" pos="0.24 0.19 0.23" quat="0.45368 0.216139 0.864557 0" size="0.038 0.153" mass="1.8" rgba="0.87 0.72 0.58 1"/>
+      <geom name="rider_forearm_right" type="capsule" pos="0.24 -0.19 0.23" quat="0.45368 -0.216139 0.864557 0" size="0.038 0.153" mass="1.8" rgba="0.87 0.72 0.58 1"/>
+    </body>
+  </worldbody>
+</mujoco>

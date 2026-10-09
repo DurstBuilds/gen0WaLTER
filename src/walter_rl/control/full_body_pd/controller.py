@@ -49,7 +49,8 @@ class FullBodyPdController:
   """Map torso pitch, roll, forward speed, and yaw rate onto Walter's actions.
 
   A stall in forward speed overrides the roll knee pose and spins every knee
-  about +Y. The knee position servo is still the inner loop.
+  about +Y. The knee position servo is still the inner loop. While tumbling,
+  every wheel holds ``tumble.wheel_speed``.
   """
 
   def __init__(
@@ -86,6 +87,8 @@ class FullBodyPdController:
     self._settle_turns = torch.zeros_like(self._knee_ref)
     self._settling = torch.zeros_like(self._knee_ref, dtype=torch.bool)
     self._inner_down = torch.tensor([1.0, -1.0], device=device)
+    # (rear, front). Tank Mode negates only the rear knee zero.
+    self._tank_rear_flip = torch.tensor([-1.0, 1.0], device=device)
     self._knee_ctrl_ids = _knee_ctrl_ids(robot)
     self._knee_servo_is_soft = False
     self._rated_caps = _rated_caps(robot)
@@ -293,10 +296,14 @@ class FullBodyPdController:
     """Hold each inner wheel down, stopping when it is straight down."""
     position = robot.data.joint_pos[:, group.ids]
     pitch = _thigh_pitch(robot, thighs)
-    # Same front/rear signs as the hip slider. Positive lowers each inner wheel.
+    # Groups are (rear, front). Positive lowers each inner wheel. Tank Mode
+    # flips the rear zero, so the same command raises the rear wheels.
     knee = self._env.command_manager.get_term("twist").knee_angle
     direction = self._inner_down
-    level = -pitch + direction * knee.unsqueeze(-1)
+    pose_sign = direction
+    if _twist_flag(self._env, "tank_mode", default=False):
+      pose_sign = direction * self._tank_rear_flip
+    level = -pitch + pose_sign * knee.unsqueeze(-1)
     room = _room_before_vertical(pitch, level, direction, self._gains.roll.q_max)
     fold = torch.minimum(magnitude.unsqueeze(-1), room)
     self._knee_pose[:, pose_cols] = level + direction * fold
@@ -304,7 +311,10 @@ class FullBodyPdController:
     actions[:, group.columns] = target / self._knee_scale
 
   def _apply_wheels(self, actions: torch.Tensor, robot) -> None:
-    """Forward speed plus a skid-steer yaw rate from ``ang_vel_z``."""
+    """Forward speed plus a skid-steer yaw rate from ``ang_vel_z``.
+
+    Tumbling replaces both with ``tumble.wheel_speed`` on every wheel.
+    """
     command = self._env.command_manager.get_term("twist")
     velocity = self._gains.velocity
     v_cmd = command.vel_command_b[:, 0]
@@ -316,6 +326,9 @@ class FullBodyPdController:
     diff = yaw * self._gains.yaw.track_half_width / velocity.wheel_radius
     left = (omega - diff).clamp(-omega_max, omega_max) / WHEEL_ACTION_SCALE
     right = (omega + diff).clamp(-omega_max, omega_max) / WHEEL_ACTION_SCALE
+    held = _clip_wheel_action(self._gains.tumble.wheel_speed, omega_max)
+    left = torch.where(self._tumbling, held, left)
+    right = torch.where(self._tumbling, held, right)
     _write_same(actions, self._left_wheels, left)
     _write_same(actions, self._right_wheels, right)
 
@@ -598,6 +611,15 @@ def _wheel_actuator(robot):
     if any("wheel_joint" in name for name in actuator.target_names):
       return actuator
   raise KeyError("No wheel actuators found.")
+
+
+def _clip_wheel_action(speed: float, omega_max: float) -> float:
+  """Scale a wheel rate in rad/s into action units, inside the motor limit."""
+  if speed > omega_max:
+    speed = omega_max
+  elif speed < -omega_max:
+    speed = -omega_max
+  return speed / WHEEL_ACTION_SCALE
 
 
 def _wheel_columns(robot, columns: dict[str, int], side: str, device) -> torch.Tensor:

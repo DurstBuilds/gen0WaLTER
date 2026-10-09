@@ -61,9 +61,9 @@ class RollGains:
   kd: float = 0.5
   q_max: float = math.pi / 2.0
   actuator_kp: float = 250.0
-  actuator_kd: float = 30.0
+  actuator_kd: float = 50.0
   tank_actuator_kp: float = 250.0
-  tank_actuator_kd: float = 30.0
+  tank_actuator_kd: float = 50.0
   sign: float = 1.0
 
 
@@ -122,15 +122,20 @@ class TumbleGains:
 
   ``rate`` is the knee angular velocity, in rad/s. Positive is +Y on every
   knee axis, which drops the front wheel and lifts the rear.
+
+  ``wheel_speed`` is the wheel rate, in rad/s, written to every wheel while
+  tumbling. Positive matches a positive forward command. The velocity and
+  yaw loops resume once tumbling ends, including during the knee settle.
   """
 
-  threshold: float = 0.6
-  release: float = 0.4
-  cap: float = 2.5
-  leak: float = 1.0
-  min_forward_cmd: float = 0.9
+  threshold: float = 0.2
+  release: float = 0.1
+  cap: float = 0.5
+  leak: float = 2.5
+  min_forward_cmd: float = 0.2
   min_speed_error: float = 0.6
   rate: float = 3.0
+  wheel_speed: float = 0.0
 
 
 @dataclass
@@ -188,7 +193,7 @@ def format_gains(gains: FullBodyPdGains) -> str:
       f"tumble threshold={tumble.threshold} release={tumble.release} "
       f"cap={tumble.cap} leak={tumble.leak} "
       f"min_cmd={tumble.min_forward_cmd} min_error={tumble.min_speed_error} "
-      f"rate={tumble.rate}",
+      f"rate={tumble.rate} wheel_speed={tumble.wheel_speed}",
       f"waist kp={waist.kp} kd={waist.kd} effort={waist.effort_limit}",
     )
   )
