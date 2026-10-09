@@ -89,6 +89,8 @@ class FullBodyPdController:
     self._inner_down = torch.tensor([1.0, -1.0], device=device)
     # (rear, front). Tank Mode negates only the rear knee zero.
     self._tank_rear_flip = torch.tensor([-1.0, 1.0], device=device)
+    # Flip front hip negates only the front knee zero.
+    self._front_knee_flip = torch.tensor([1.0, -1.0], device=device)
     self._knee_ctrl_ids = _knee_ctrl_ids(robot)
     self._knee_servo_is_soft = False
     self._rated_caps = _rated_caps(robot)
@@ -266,11 +268,14 @@ class FullBodyPdController:
     # Zero correction is a vertical thigh. A positive angle is toward -X,
     # which is outward only for the rear hips. The twist hip slider is the
     # same sign: positive sends the front hips forward and the rear hips back.
+    # Flip front hip reverses that front pose, the way Tank Mode reverses
+    # the rear knee relative to the front.
     rear_out = correction.clamp(min=0.0, max=HIP_ANGLE_LIMIT)
     front_out = (-correction).clamp(min=0.0, max=HIP_ANGLE_LIMIT)
     hip = self._env.command_manager.get_term("twist").hip_angle
+    front_sign = _front_hip_sign(self._env)
     rear = (rear_out + hip).clamp(-HIP_ANGLE_LIMIT, HIP_ANGLE_LIMIT)
-    front = (-front_out - hip).clamp(-HIP_ANGLE_LIMIT, HIP_ANGLE_LIMIT)
+    front = (-front_out + front_sign * hip).clamp(-HIP_ANGLE_LIMIT, HIP_ANGLE_LIMIT)
     _write_same(actions, self._rear_hips.columns, rear / HIP_ACTION_SCALE)
     _write_same(actions, self._front_hips.columns, front / HIP_ACTION_SCALE)
 
@@ -297,12 +302,15 @@ class FullBodyPdController:
     position = robot.data.joint_pos[:, group.ids]
     pitch = _thigh_pitch(robot, thighs)
     # Groups are (rear, front). Positive lowers each inner wheel. Tank Mode
-    # flips the rear zero, so the same command raises the rear wheels.
+    # flips the rear zero, so the same command raises the rear wheels. Flip
+    # front hip flips the front knee zero the same way.
     knee = self._env.command_manager.get_term("twist").knee_angle
     direction = self._inner_down
     pose_sign = direction
     if _twist_flag(self._env, "tank_mode", default=False):
       pose_sign = direction * self._tank_rear_flip
+    if _twist_flag(self._env, "flip_front_hip", default=False):
+      pose_sign = pose_sign * self._front_knee_flip
     level = -pitch + pose_sign * knee.unsqueeze(-1)
     room = _room_before_vertical(pitch, level, direction, self._gains.roll.q_max)
     fold = torch.minimum(magnitude.unsqueeze(-1), room)
@@ -396,6 +404,13 @@ def _twist_flag(env: ManagerBasedRlEnv, name: str, default: bool) -> bool:
   """Read a play-viewer switch from the twist command."""
   command = env.command_manager.get_term("twist")
   return bool(getattr(command, name, default))
+
+
+def _front_hip_sign(env: ManagerBasedRlEnv) -> float:
+  """Sign of the front hip pose. Flip matches the rear's positive sign."""
+  if _twist_flag(env, "flip_front_hip", default=False):
+    return 1.0
+  return -1.0
 
 
 def _rated_caps(robot) -> list[tuple[object, float, float]]:

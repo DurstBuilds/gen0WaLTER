@@ -11,7 +11,9 @@ from __future__ import annotations
 
 import argparse
 
-from mjlab.viewer import NativeMujocoViewer, ViserPlayViewer
+from mjlab.viewer import NativeMujocoViewer
+
+from walter_rl.viewer import WalterViserPlayViewer
 
 from walter_rl.assets.payloads import available_payloads
 from walter_rl.control.full_body_pd.env import TaskName, make_pd_env
@@ -31,7 +33,7 @@ def main() -> None:
     payload=args.payload,
   )
   policy = FullBodyPdPolicy(env)
-  viewer = ViserPlayViewer if args.viewer == "viser" else NativeMujocoViewer
+  viewer = WalterViserPlayViewer if args.viewer == "viser" else NativeMujocoViewer
   try:
     viewer(env, policy).run()
   finally:

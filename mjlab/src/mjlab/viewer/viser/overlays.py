@@ -53,6 +53,7 @@ class ViserTermOverlays:
   frame_time: float
   reward_bar_max_terms: int = 20
   policy_getter: Callable[[], Any] | None = None
+  motor_joint_label: Callable[[str], str] | None = None
   reward_plotter: ViserTermPlotter | None = None
   reward_bar_panel: RewardBarPanel | None = None
   metrics_plotter: ViserTermPlotter | None = None
@@ -100,7 +101,7 @@ class ViserTermOverlays:
     sim_scene = getattr(self.env.unwrapped, "scene", None)
     motors = []
     if sim_scene is not None and hasattr(sim_scene, "entities"):
-      motors = list_joint_motors(sim_scene)
+      motors = list_joint_motors(sim_scene, joint_label=self.motor_joint_label)
     if not motors and not _has_control_errors(self._policy()):
       return
     with tabs.add_tab("Motors", icon=viser.Icon.ENGINE):

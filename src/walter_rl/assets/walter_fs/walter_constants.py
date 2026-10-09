@@ -392,6 +392,7 @@ def _geared_motor(
     saturation_effort=curve.saturation_effort,
     velocity_limit=curve.velocity_limit,
     effort_limit=curve.effort_limit,
+    joint_to_actuator_gear=external_gear_ratio,
   )
 
 

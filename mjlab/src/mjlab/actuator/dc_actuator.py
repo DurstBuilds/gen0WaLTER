@@ -72,6 +72,14 @@ class DcMotorActuatorCfg(IdealPdActuatorCfg):
   velocity_limit: float
   """Maximum motor velocity (no-load speed)."""
 
+  joint_to_actuator_gear: float = 1.0
+  """Reduction from actuator output to joint.
+
+  Joint torque equals actuator output torque times this ratio. Joint speed
+  equals actuator output speed divided by this ratio. Used only for readouts
+  (for example the Viser motors tab); simulation limits stay joint-side.
+  """
+
   def __post_init__(self) -> None:
     """Validate DC motor parameters."""
     super().__post_init__()

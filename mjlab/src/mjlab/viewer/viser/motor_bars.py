@@ -1,9 +1,15 @@
-"""Live torque and speed bars for every joint motor in the Viser sidebar."""
+"""Live torque and speed bars for every joint motor in the Viser sidebar.
+
+When an actuator sets ``joint_to_actuator_gear``, values are shown at the
+actuator output (CubeMars gearbox output): torque in N·m and speed in rpm.
+Otherwise joint torque (N·m) and joint speed (rpm) are shown.
+"""
 
 from __future__ import annotations
 
 import html
 import math
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
@@ -16,6 +22,7 @@ from mjlab.utils.mujoco import dof_width
 
 _BAR_HEIGHT_PX = 18
 _LABEL_WIDTH_PX = 168
+_RAD_S_TO_RPM = 60.0 / math.tau
 
 
 @dataclass(frozen=True)
@@ -29,7 +36,10 @@ class JointMotor:
   target_index: int
 
 
-def list_joint_motors(scene: Any) -> list[JointMotor]:
+def list_joint_motors(
+  scene: Any,
+  joint_label: Callable[[str], str] | None = None,
+) -> list[JointMotor]:
   """Return every 1-DoF joint motor on the scene, in actuator order."""
   entities = [
     (name, entity)
@@ -39,7 +49,7 @@ def list_joint_motors(scene: Any) -> list[JointMotor]:
   prefix_entity = len(entities) > 1
   motors: list[JointMotor] = []
   for name, entity in entities:
-    motors.extend(_entity_motors(name, entity, prefix_entity))
+    motors.extend(_entity_motors(name, entity, prefix_entity, joint_label))
   return motors
 
 
@@ -120,7 +130,7 @@ class MotorSidebar:
     labels = [motor.label for motor in motors]
     with server.gui.add_folder("Torque (N·m)"):
       self._torque = SignedBarPanel(server, labels)
-    with server.gui.add_folder("Speed (rad/s)"):
+    with server.gui.add_folder("Speed (rpm)"):
       self._speed = SignedBarPanel(server, labels)
 
   def update(self, env_idx: int) -> None:
@@ -141,13 +151,20 @@ def _is_joint_actuator(actuator: Any) -> bool:
   return actuator.transmission_type == TransmissionType.JOINT
 
 
-def _entity_motors(name: str, entity: Any, prefix_entity: bool) -> list[JointMotor]:
+def _entity_motors(
+  name: str,
+  entity: Any,
+  prefix_entity: bool,
+  joint_label: Callable[[str], str] | None,
+) -> list[JointMotor]:
   dof_of_joint = _scalar_dof_ids(entity)
   motors: list[JointMotor] = []
   for actuator in entity.actuators:
     if not _is_joint_actuator(actuator):
       continue
-    motors.extend(_actuator_motors(name, actuator, dof_of_joint, prefix_entity))
+    motors.extend(
+      _actuator_motors(name, actuator, dof_of_joint, prefix_entity, joint_label)
+    )
   return motors
 
 
@@ -156,6 +173,7 @@ def _actuator_motors(
   actuator: Any,
   dof_of_joint: list[int | None],
   prefix_entity: bool,
+  joint_label: Callable[[str], str] | None,
 ) -> list[JointMotor]:
   motors: list[JointMotor] = []
   joint_ids = actuator.target_ids.tolist()
@@ -164,7 +182,8 @@ def _actuator_motors(
     if dof_index is None:
       continue
     joint_name = actuator.target_names[target_index]
-    label = f"{entity_name}/{joint_name}" if prefix_entity else joint_name
+    display = joint_label(joint_name) if joint_label is not None else joint_name
+    label = f"{entity_name}/{display}" if prefix_entity else display
     motors.append(
       JointMotor(label, entity_name, dof_index, actuator, target_index)
     )
@@ -229,10 +248,23 @@ def _fill_entity(
   speed_row = entity.data.joint_vel[env_idx, dof_ids].detach().cpu().numpy()
   for column, slot in enumerate(slots):
     motor = motors[slot]
-    torques[slot] = float(torque_row[column])
-    speeds[slot] = float(speed_row[column])
-    torque_limits[slot] = _torque_limit(motor.actuator, env_idx, motor.target_index)
-    speed_limits[slot] = _speed_limit(motor.actuator, env_idx, motor.target_index)
+    gear = _joint_to_actuator_gear(motor.actuator)
+    joint_torque = float(torque_row[column])
+    joint_speed = float(speed_row[column])
+    torques[slot] = joint_torque / gear
+    speeds[slot] = joint_speed * gear * _RAD_S_TO_RPM
+    torque_limits[slot] = _torque_limit(motor.actuator, env_idx, motor.target_index) / gear
+    speed_limits[slot] = (
+      _speed_limit(motor.actuator, env_idx, motor.target_index) * gear * _RAD_S_TO_RPM
+    )
+
+
+def _joint_to_actuator_gear(actuator: Any) -> float:
+  """Extra reduction from actuator output shaft to joint, or 1 if none."""
+  gear = getattr(actuator.cfg, "joint_to_actuator_gear", 1.0)
+  if not math.isfinite(gear) or gear <= 0.0:
+    return 1.0
+  return float(gear)
 
 
 def _torque_limit(actuator: Any, env_idx: int, target_index: int) -> float:

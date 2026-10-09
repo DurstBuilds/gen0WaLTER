@@ -72,6 +72,7 @@ class ViserPlayViewer(BaseViewer):
     verbosity: VerbosityLevel = VerbosityLevel.SILENT,
     viser_server: viser.ViserServer | None = None,
     checkpoint_manager: CheckpointManager | None = None,
+    motor_joint_label: Callable[[str], str] | None = None,
   ) -> None:
     super().__init__(env, policy, frame_rate, verbosity)
     self._ckpt_mgr = checkpoint_manager
@@ -87,6 +88,7 @@ class ViserPlayViewer(BaseViewer):
     self._timing_last_log_time: float = 0.0
     self._external_server = viser_server is not None
     self._server = viser_server or viser.ViserServer(label="mjlab")
+    self._motor_joint_label = motor_joint_label
 
   @override
   def setup(self) -> None:
@@ -210,6 +212,7 @@ class ViserPlayViewer(BaseViewer):
       self.frame_time,
       reward_bar_max_terms=self.cfg.reward_bar_max_terms,
       policy_getter=lambda: self.policy,
+      motor_joint_label=self._motor_joint_label,
     )
     self._term_overlays.setup_tabs(tabs)
     self._debug_overlays = ViserDebugOverlays(self.env, self._scene)

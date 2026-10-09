@@ -128,6 +128,8 @@ class UniformVelocityCommand(CommandTerm):
     self.knee_angle = torch.zeros(self.num_envs, device=self.device)
     # Latched with the pose sliders. The knee servo reads this each action.
     self.tank_mode = False
+    # Positive hip_angle points the front hips forward. Flip matches the rear.
+    self.flip_front_hip = False
     # Play switches. Tumbling and orientation start on. Torque and speed stay
     # on the peak envelope until the rated caps are checked.
     self.tumbling_enabled = True
@@ -149,6 +151,7 @@ class UniformVelocityCommand(CommandTerm):
     # Set by create_gui() when the viewer is active.
     self._joystick_enabled: viser.GuiCheckboxHandle | None = None
     self._tank_mode: viser.GuiCheckboxHandle | None = None
+    self._flip_front_hip: viser.GuiCheckboxHandle | None = None
     self._tumbling_enabled: viser.GuiCheckboxHandle | None = None
     self._orientation_enabled: viser.GuiCheckboxHandle | None = None
     self._cap_rated_torque: viser.GuiCheckboxHandle | None = None
@@ -340,6 +343,14 @@ class UniformVelocityCommand(CommandTerm):
 
         sliders.append(slider)
 
+      flip_front_hip = server.gui.add_checkbox(
+        "Flip front hip",
+        initial_value=False,
+        hint=(
+          "Reverse the front hip so it swings with the rear. "
+          "Unchecked, positive hip_angle points the front hips forward."
+        ),
+      )
       hip_slider = server.gui.add_slider(
         "hip_angle",
         min=-_HIP_ANGLE_LIMIT_DEG,
@@ -402,7 +413,9 @@ class UniformVelocityCommand(CommandTerm):
         "**Rated speed cap** makes driving torque fall to zero at rated "
         "speed. Unchecked, that corner is the no-load speed.\n\n"
         "**hip_angle** is degrees. Positive points the front hips forward "
-        "and the rear hips backward.\n\n"
+        "and the rear hips backward. **Flip front hip** reverses the front, "
+        "so positive swings it with the rear. A tumble solves the front hip "
+        "again for that sign, and the knee still holds the body level.\n\n"
         "**knee_angle** is degrees and shifts the knee zero. Positive lowers "
         "the front inner wheels. With **Tank Mode** on, the rear zero moves "
         "the other way, so positive raises the rear inner wheels."
@@ -414,6 +427,8 @@ class UniformVelocityCommand(CommandTerm):
     self._joystick_enabled = enabled
     self._tank_mode = tank_mode
     self.tank_mode = bool(tank_mode.value)
+    self._flip_front_hip = flip_front_hip
+    self.flip_front_hip = bool(flip_front_hip.value)
     self._tumbling_enabled = tumbling
     self.tumbling_enabled = bool(tumbling.value)
     self._orientation_enabled = orientation
@@ -443,6 +458,8 @@ class UniformVelocityCommand(CommandTerm):
     self._apply_knee_slider()
     if self._tank_mode is not None:
       self.tank_mode = bool(self._tank_mode.value)
+    if self._flip_front_hip is not None:
+      self.flip_front_hip = bool(self._flip_front_hip.value)
     if self._tumbling_enabled is not None:
       self.tumbling_enabled = bool(self._tumbling_enabled.value)
     if self._orientation_enabled is not None:
