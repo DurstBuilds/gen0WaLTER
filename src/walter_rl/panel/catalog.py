@@ -7,6 +7,7 @@ from datetime import datetime
 from pathlib import Path
 
 from walter_rl.assets.payloads import available_payloads
+from walter_rl.panel.paths import checkpoint_log_roots
 from walter_rl.tasks.velocity.config.walter_fs.env_cfgs import (
   _TRAIN_ANG_VEL_Z,
   _TRAIN_LIN_VEL_X,
@@ -118,11 +119,13 @@ def _payload_choices() -> list[dict]:
 
 
 def _run_dirs(root: Path) -> list[Path]:
-  """Return timestamp directories under logs/rsl_rl."""
-  logs = root / "logs" / "rsl_rl"
-  if not logs.is_dir():
-    return []
-  return [path for path in logs.glob("*/*") if path.is_dir()]
+  """Return timestamp directories under each training log root."""
+  found: list[Path] = []
+  for logs in checkpoint_log_roots(root):
+    if not logs.is_dir():
+      continue
+    found.extend(path for path in logs.glob("*/*") if path.is_dir())
+  return found
 
 
 def _collect_run(root: Path, path: Path) -> tuple[str, dict] | None:
@@ -155,14 +158,15 @@ def _checkpoints(root: Path, run_dir: Path) -> list[dict]:
 
 def _experiment_label(folder: str) -> str:
   """Turn a log folder name into a short run title."""
-  if folder == "walter_fs_velocity":
-    return "Velocity, flat"
-  if folder == "walter_fs_teacher":
-    return "Teacher, flat"
-  if folder.startswith("walter_fs_teacher_"):
-    return f"Teacher, {folder.removeprefix('walter_fs_teacher_')}"
-  if folder.startswith("walter_fs_velocity_"):
-    return f"Velocity, {folder.removeprefix('walter_fs_velocity_')}"
+  for prefix, title in (
+    ("walter_fs_state_machine", "State machine"),
+    ("walter_fs_velocity", "Velocity"),
+    ("walter_fs_teacher", "Teacher"),
+  ):
+    if folder == prefix:
+      return f"{title}, flat"
+    if folder.startswith(f"{prefix}_"):
+      return f"{title}, {folder.removeprefix(f'{prefix}_')}"
   return folder
 
 

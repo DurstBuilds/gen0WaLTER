@@ -1,7 +1,11 @@
 """Train a WaLTER FS velocity policy with PPO.
 
+The default run trains a 1-D tumble toggle on top of the full-body PD
+controller. Pass ``--teacher`` for the 16-D teacher-student stack.
+
 Examples:
   python scripts/train.py --num-envs 8 --max-iterations 2
+  python scripts/train.py --task rough-test --num-envs 4096 --max-iterations 500
   python scripts/train.py --teacher --num-envs 8 --max-iterations 2
   python scripts/train.py --teacher --task rough-test --max-iterations 500
   python scripts/train.py --resume logs/rsl_rl/.../model_500.pt --max-iterations 500
@@ -16,9 +20,9 @@ are and still load through ``--resume`` with an explicit path.
 checkpoints go in a fresh timestamp directory under the log root.
 
 ``--task`` matches playback: ``flat``, ``rough``, ``rough-test``, and
-``stairs``. The default is ``flat``. Metrics and checkpoints are uploaded
-to the Weights & Biases project ``walter-rl``. Log in once with
-``wandb login`` before the first run.
+``stairs``. The default is ``flat``. Scalars are written as TensorBoard
+events in the run log directory. View them with
+``uv run tensorboard --logdir research/logs/training``.
 """
 
 from __future__ import annotations
@@ -33,15 +37,19 @@ from rsl_rl.runners import OnPolicyRunner
 from mjlab.envs import ManagerBasedRlEnv
 
 from walter_rl.rl.ppo import walter_ppo_runner_cfg
+from walter_rl.rl.state_machine_env import StateMachineEnv
 from walter_rl.rl.teacher_env import TeacherStudentEnv
-from walter_rl.rl.vecenv import RslRlVecEnvWrapper
+from walter_rl.rl.vecenv import RslRlVecEnvWrapper, StateMachineVecEnv
 from walter_rl.tasks.velocity.config.walter_fs.env_cfgs import (
   RlSceneName,
   _TRAIN_ANG_VEL_Z,
   _TRAIN_LIN_VEL_X,
-  walter_fs_rl_env_cfg,
+  walter_fs_state_machine_env_cfg,
   walter_fs_teacher_env_cfg,
 )
+
+_STATE_MACHINE_CLIP = 1.0
+_STATE_MACHINE_HIDDEN = (256, 128, 64)
 
 _DEFAULT_LOG_ROOT = Path("research/logs/training")
 _TASKS = ("flat", "rough", "rough-test", "stairs")
@@ -56,9 +64,11 @@ def main() -> None:
   if args.teacher:
     cfg = walter_fs_teacher_env_cfg(play=False, task=task)
     env_cls = TeacherStudentEnv
+    clip_actions = None
   else:
-    cfg = walter_fs_rl_env_cfg(play=False, task=task)
-    env_cls = ManagerBasedRlEnv
+    cfg = walter_fs_state_machine_env_cfg(play=False, task=task)
+    env_cls = StateMachineEnv
+    clip_actions = _STATE_MACHINE_CLIP
   cfg.scene.num_envs = args.num_envs
   cfg.seed = 42
   _apply_command_ranges(cfg, args)
@@ -71,6 +81,8 @@ def main() -> None:
     device,
     resume,
     args.log_root,
+    clip_actions,
+    _STATE_MACHINE_HIDDEN if not args.teacher else (512, 256, 128),
   )
 
 
@@ -81,15 +93,22 @@ def _learn(
   device: str,
   resume: Path | None,
   log_root: Path,
+  clip_actions: float | None,
+  hidden_dims: tuple[int, ...],
 ) -> Path:
   """Run PPO and return the directory that holds the checkpoints."""
   agent_cfg = walter_ppo_runner_cfg(
     max_iterations=max_iterations,
     experiment_name=experiment_name,
+    clip_actions=clip_actions,
+    hidden_dims=hidden_dims,
   )
   log_dir = log_root / experiment_name / datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
   log_dir.mkdir(parents=True, exist_ok=True)
-  wrapped = RslRlVecEnvWrapper(env, clip_actions=agent_cfg["clip_actions"])
+  wrapper_cls = (
+    StateMachineVecEnv if isinstance(env, StateMachineEnv) else RslRlVecEnvWrapper
+  )
+  wrapped = wrapper_cls(env, clip_actions=agent_cfg["clip_actions"])
   runner = OnPolicyRunner(wrapped, agent_cfg, log_dir=str(log_dir), device=device)
   _load_resume(runner, resume)
   print(f"[INFO] Training on {device}. Logs: {log_dir}")
@@ -141,7 +160,10 @@ def _apply_teacher_only_reward(cfg, enabled: bool) -> None:
 
 def _experiment_name(teacher: bool, task: str) -> str:
   """Return the log folder. Flat keeps the original name."""
-  base = "walter_fs_teacher" if teacher else "walter_fs_velocity"
+  if teacher:
+    base = "walter_fs_teacher"
+  else:
+    base = "walter_fs_state_machine"
   if task == "flat":
     return base
   return f"{base}_{task}"
@@ -167,7 +189,7 @@ def _parse_args() -> argparse.Namespace:
   parser.add_argument(
     "--teacher",
     action="store_true",
-    help="Add the full-body PD action-matching reward.",
+    help="Train the 16-D teacher-student policy instead of the tumble toggle.",
   )
   parser.add_argument(
     "--teacher-only-reward",

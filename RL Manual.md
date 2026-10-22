@@ -16,7 +16,7 @@ Playback covers both kinds of controller. `scripts/play.py --policy pd` runs the
 - PPO through rsl-rl 5.4 (`OnPolicyRunner`) on the vendored mjlab `ManagerBasedRlEnv`.
 - Separate actor and critic MLPs, observation normalization, and a Gaussian policy.
 - Teacher-student training: the PD action is snapshotted before physics, then scored with an exponential match reward of weight `0.5`.
-- Weights & Biases project `walter-rl` for scalars, the training config, and checkpoints. TensorBoard files are still written under `logs/rsl_rl/`.
+- TensorBoard scalars under each run log directory (default root `research/logs/training/`).
 - Checkpoint playback in the Viser browser viewer or MuJoCo's native viewer, and the existing PD play scripts stay available.
 
 # User Manual
@@ -29,7 +29,6 @@ Playback covers both kinds of controller. `scripts/play.py --policy pd` runs the
 | [uv](https://docs.astral.sh/uv/) | **0.11.19** or newer (`uv_build>=0.12.1,<0.13`) |
 | Operating system | Linux. mjlab sets `MUJOCO_GL=egl` on Linux before MuJoCo imports. |
 | GPU | Optional NVIDIA GPU. Training uses `cuda:0` when PyTorch can see it, and `cpu` otherwise. |
-| Weights & Biases account | A logged-in `wandb` user. The project name is `walter-rl`. |
 | Viewer | A browser for `--viewer viser`, or a local display for `--viewer native`. Playback only. |
 
 RL-specific packages from `pyproject.toml`:
@@ -37,7 +36,6 @@ RL-specific packages from `pyproject.toml`:
 | Package | Pin |
 | --- | --- |
 | rsl-rl-lib | `5.4.2` |
-| wandb | `>=0.22.3` (the lockfile resolves **0.30.0**) |
 | tensorboard | `>=2.20.0` |
 | tensordict | unpinned; required by the rsl-rl observation dict |
 | mjlab | editable path source, `mjlab/` |
@@ -53,10 +51,9 @@ git clone [INSERT REPOSITORY URL HERE]
 cd gen0WaLTER
 uv python install 3.13
 uv sync
-wandb login
 ```
 
-`uv sync` creates `.venv` and installs `walter_rl`, `mjlab`, `rsl-rl-lib`, and `wandb`. `wandb login` writes credentials to `~/.netrc`. Training reads that file on the next run. Set `WANDB_USERNAME` when the run should be filed under an entity other than the logged-in user.
+`uv sync` creates `.venv` and installs `walter_rl`, `mjlab`, `rsl-rl-lib`, and `tensorboard`.
 
 ## Quick Start / Usage
 
@@ -102,7 +99,7 @@ Then open <http://127.0.0.1:8765>. Playback still uses the Viser viewer or the n
 
 Lower `--num-envs` when the GPU runs out of memory. One learning iteration collects 24 control steps from every environment. The control step is 0.02 s, so one iteration is 0.48 s of simulated time per environment. Five thousand iterations is 40 minutes of experience per environment.
 
-Play a checkpoint. The path is printed as `Logs:` at the start of training, and again in the Weights & Biases run.
+Play a checkpoint. The run directory is printed as `Logs:` at the start of training.
 
 ```bash
 uv run python scripts/play.py --policy checkpoint \
@@ -140,7 +137,7 @@ There is no `.env` file. Training behavior comes from CLI flags, `src/walter_rl/
 | `--task` | `flat` | `flat`, `rough`, `rough-test`, `stairs`. Same scenes as playback. |
 | `--teacher` | off | Train in `TeacherStudentEnv` and add the PD match reward. |
 | `--device` | GPU if present | `cuda:0` or `cpu`. |
-| `--resume` | none | Checkpoint to continue from. `--max-iterations` counts additional updates. Logs go to a new timestamp directory and a new W&B run. |
+| `--resume` | none | Checkpoint to continue from. `--max-iterations` counts additional updates. Logs go to a new timestamp directory. |
 
 The seed is `42` in both the environment and the runner. It is not a CLI flag.
 
@@ -148,13 +145,12 @@ The seed is `42` in both the environment and the runner. It is not a CLI flag.
 
 | Output | Location |
 | --- | --- |
-| Checkpoints and TensorBoard | `logs/rsl_rl/walter_fs_velocity/<YYYY-MM-DD_HH-MM-SS>/` |
-| Teacher run | `logs/rsl_rl/walter_fs_teacher/<timestamp>/` |
+| Checkpoints and TensorBoard | `research/logs/training/walter_fs_velocity/<YYYY-MM-DD_HH-MM-SS>/` (override with `--log-root`) |
+| Teacher run | `research/logs/training/walter_fs_teacher/<timestamp>/` |
 | Other scenes | Same folders with a `_<task>` suffix, for example `walter_fs_teacher_rough-test` |
-| Weights & Biases | Project [`walter-rl`](https://wandb.ai). Run name is the timestamp directory. |
-| Local W&B files | `wandb/run-<timestamp>-<id>/` at the repo root |
+| Older runs | `logs/rsl_rl/` still loads through `--resume` with an explicit checkpoint path |
 
-Checkpoints are saved every 50 iterations (`save_interval` in `walter_ppo_runner_cfg`) and at the end of the run. `model_<iteration>.pt` is the file `scripts/play.py` loads. The same files are uploaded to the W&B run.
+Checkpoints are saved every 50 iterations (`save_interval` in `walter_ppo_runner_cfg`) and at the end of the run. `model_<iteration>.pt` is the file `scripts/play.py` loads. View scalars with `uv run tensorboard --logdir research/logs/training`.
 
 ### Commands and rewards
 
@@ -220,13 +216,6 @@ Settings live in `walter_ppo_runner_cfg`:
 
 Checkpoint playback uses `--task` for the ground and the same 384-number observation on every scene, including teacher checkpoints. `--payload` applies when `--policy pd`. Checkpoints trained before the terrain scan was added are 59-number actors and do not load.
 
-### Environment variables
-
-| Variable | Effect |
-| --- | --- |
-| `WANDB_USERNAME` | W&B entity. Unset uses the logged-in user. |
-| `WANDB_API_KEY` | Optional alternative to `wandb login` for a headless machine. |
-
 # File Explanations (Directory Structure)
 
 ```
@@ -249,7 +238,6 @@ gen0WaLTER/
 │   │   ├── ppo.py
 │   │   ├── vecenv.py
 │   │   ├── teacher_env.py
-│   │   ├── wandb_logger.py
 │   │   └── checkpoint_policy.py
 │   ├── tasks/velocity/
 │   │   ├── mdp/rewards.py
@@ -259,24 +247,23 @@ gen0WaLTER/
 │       ├── env.py
 │       └── policy.py
 ├── mjlab/
-├── logs/rsl_rl/
-└── wandb/
+├── research/logs/training/
+└── logs/rsl_rl/
 ```
 
 - `scripts/train.py` builds the scene from `--task`, wraps it for rsl-rl, and calls `OnPolicyRunner.learn`. `--teacher` selects `TeacherStudentEnv` and the `walter_fs_teacher` log folder. Other scenes use a `_<task>` suffix. `--resume` loads a checkpoint's weights, optimizer, and iteration counter before `learn`.
 - `scripts/panel.py` serves the browser control panel on `127.0.0.1:8765`. The page starts `play.py`, `play_smooth_tumble.py`, or `train.py`, and it can stop that process.
 - `scripts/play.py` opens the viewer on `FullBodyPdPolicy` or on a loaded actor.
 - `scripts/check_teacher_reward.py` rolls out a fixed forward and yaw command, once following the teacher and once with zeros, and checks the match term.
-- `src/walter_rl/rl/ppo.py` is the runner dict: networks, PPO hyperparameters, the W&B logger class, and the checkpoint interval.
+- `src/walter_rl/rl/ppo.py` is the runner dict: networks, PPO hyperparameters, TensorBoard logging, and the checkpoint interval.
 - `src/walter_rl/rl/vecenv.py` adapts `ManagerBasedRlEnv` to the rsl-rl 5.4 vector env. It resets once at construction because the runner does not.
 - `src/walter_rl/rl/teacher_env.py` calls `FullBodyPdController.act()` before `step` and stores `teacher_action`. `follow_teacher` applies that action and is used by the check script.
-- `src/walter_rl/rl/wandb_logger.py` starts the `walter-rl` run and stores a JSON-safe copy of the configs. Reward functions are saved as strings.
 - `src/walter_rl/rl/checkpoint_policy.py` turns the viewer observation dict into the TensorDict the actor expects.
 - `env_cfgs.py` defines `walter_fs_rl_env_cfg` and `walter_fs_teacher_env_cfg`, including the reward weights.
 - `rewards.py` holds `track_teacher_action` and `teacher_action_mse`.
 - `control/full_body_pd/` is the teacher. `_add_waist_lock` gives the RL task the same waist actuator, absolute knees, and hip and knee gains as the PD controller, and it copies the shared articulation before editing it.
 - `mjlab/` is the vendored environment library. This repo trains with rsl-rl directly and does not use an upstream mjlab `train.py`.
-- `logs/rsl_rl/` and `wandb/` are run outputs. Leave them out of commits.
+- `research/logs/training/` and `logs/rsl_rl/` are run outputs. Leave them out of commits.
 
 # Developer Notes
 
@@ -288,17 +275,17 @@ Training is a thin adapter around two libraries. mjlab owns the scene, commands,
 
 Teacher training subclasses the environment rather than calling the controller from the reward. Reward evaluation happens after `sim.step`, so a teacher queried there would see the next state. `TeacherStudentEnv.step` records the PD action first, then applies the student action (or the teacher action when `follow_teacher` is set).
 
-Logging subclasses rsl-rl's `WandbLogWriter`. The installed writer passes `start_method="thread"` into `wandb.Settings`, which Weights & Biases 0.30 rejects, and it tries to upload reward callables. `WalterWandbLogWriter` starts the run without that setting and stringifies values W&B cannot store. The project name is the constant `WANDB_PROJECT` in `wandb_logger.py`.
+Logging uses rsl-rl's built-in `"tensorboard"` logger: PyTorch `SummaryWriter` events under the run directory, including wall-clock series for mean reward and episode length.
 
 ## Development Setup
 
-Install as in [Installation](#installation), then run a one-iteration job to confirm CUDA and W&B:
+Install as in [Installation](#installation), then run a one-iteration job to confirm CUDA and logging:
 
 ```bash
 uv run python scripts/train.py --num-envs 4 --max-iterations 1
 ```
 
-A healthy smoke run prints a W&B run URL, finite `Mean value loss`, `Mean surrogate loss`, and `Mean entropy loss`, and leaves `model_0.pt` in the timestamped log directory. Add `--teacher` to exercise the match reward. The log should include `Episode_Reward/track_teacher` and `Episode_Metrics/teacher_action_mse` once an episode ends. One iteration is often shorter than the 20 s episode, so those episode averages can be absent until a longer run.
+A healthy smoke run prints `[INFO] ... Logs: <path>`, finite `Mean value loss`, `Mean surrogate loss`, and `Mean entropy loss`, and leaves `model_0.pt` and TensorBoard events in that directory. Add `--teacher` to exercise the match reward. The log should include `Episode_Reward/track_teacher` and `Episode_Metrics/teacher_action_mse` once an episode ends. One iteration is often shorter than the 20 s episode, so those episode averages can be absent until a longer run.
 
 `--task` selects the scene. Edit `_configure_simple_commands` and `_configure_simple_rewards` to change the velocity task itself. To change PPO, edit `walter_ppo_runner_cfg`. Keep `rnd_cfg` and `symmetry_cfg` present and set to `None`. The rsl-rl 5.4 runner reads both keys every iteration.
 

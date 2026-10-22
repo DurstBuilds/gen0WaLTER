@@ -64,7 +64,7 @@ class JobManager:
       kind = self._kind
       summary = self._summary
       return_code = None if self._process is None else self._process.poll()
-    viewer_url, wandb_url = _links(lines)
+    viewer_url, log_dir = _links(lines)
     if state == "running":
       return_code = None
     return {
@@ -73,7 +73,7 @@ class JobManager:
       "summary": summary,
       "lines": lines,
       "viewer_url": viewer_url,
-      "wandb_url": wandb_url,
+      "log_dir": log_dir,
       "return_code": return_code,
     }
 
@@ -125,15 +125,19 @@ def _signal_group(process: subprocess.Popen[str], sig: signal.Signals) -> None:
     return
 
 
+_LOG_DIR = re.compile(r"\[INFO\].*Logs:\s*(.+)$")
+
+
 def _links(lines: list[str]) -> tuple[str | None, str | None]:
-  """Pick the viewer URL and the Weights & Biases URL out of the log."""
+  """Pick the viewer URL and the training log directory out of the log."""
   viewer_url = None
-  wandb_url = None
+  log_dir = None
   for line in lines:
+    match = _LOG_DIR.search(line)
+    if match:
+      log_dir = match.group(1).strip()
     for raw in _URL.findall(line):
       url = raw.rstrip(").,]>\"'")
-      if "wandb.ai" in url:
-        wandb_url = wandb_url or url
-      elif viewer_url is None:
+      if viewer_url is None:
         viewer_url = url
-  return viewer_url, wandb_url
+  return viewer_url, log_dir

@@ -2,10 +2,7 @@
 
 from __future__ import annotations
 
-from walter_rl.rl.wandb_logger import WANDB_PROJECT
-
 _ACTOR_HIDDEN = (512, 256, 128)
-_CRITIC_HIDDEN = (512, 256, 128)
 
 
 def walter_ppo_runner_cfg(
@@ -13,12 +10,14 @@ def walter_ppo_runner_cfg(
   max_iterations: int,
   experiment_name: str = "walter_fs_velocity",
   save_interval: int = 50,
+  clip_actions: float | None = None,
+  hidden_dims: tuple[int, ...] = _ACTOR_HIDDEN,
 ) -> dict:
   """Build the dict ``OnPolicyRunner`` reads for the WaLTER velocity task.
 
-  Actor and critic are separate MLPs. Metrics and checkpoints go to the
-  Weights & Biases project ``walter-rl``. ``rnd_cfg`` is present and empty
-  because the rsl-rl 5.4 runner indexes that key every iteration.
+  Actor and critic are separate MLPs. Metrics go to TensorBoard under the
+  run log directory. ``rnd_cfg`` is present and empty because the rsl-rl 5.4
+  runner indexes that key every iteration.
   """
   return {
     "seed": 42,
@@ -27,16 +26,13 @@ def walter_ppo_runner_cfg(
     "save_interval": save_interval,
     "experiment_name": experiment_name,
     "run_name": "",
-    "logger": {
-      "class_name": "walter_rl.rl.wandb_logger:WalterWandbLogWriter",
-      "project_name": WANDB_PROJECT,
-    },
+    "logger": "tensorboard",
     "obs_groups": {"actor": ["actor"], "critic": ["critic"]},
-    "clip_actions": None,
-    "upload_model": True,
+    "clip_actions": clip_actions,
+    "upload_model": False,
     "check_for_nan": True,
-    "actor": _mlp_cfg(stochastic=True),
-    "critic": _mlp_cfg(stochastic=False),
+    "actor": _mlp_cfg(stochastic=True, hidden_dims=hidden_dims),
+    "critic": _mlp_cfg(stochastic=False, hidden_dims=hidden_dims),
     "algorithm": {
       "class_name": "PPO",
       "num_learning_epochs": 5,
@@ -60,9 +56,9 @@ def walter_ppo_runner_cfg(
   }
 
 
-def _mlp_cfg(*, stochastic: bool) -> dict:
+def _mlp_cfg(*, stochastic: bool, hidden_dims: tuple[int, ...]) -> dict:
   """One MLPModel entry. The critic has no action distribution."""
-  hidden = _ACTOR_HIDDEN if stochastic else _CRITIC_HIDDEN
+  hidden = hidden_dims
   cfg = {
     "class_name": "MLPModel",
     "hidden_dims": hidden,

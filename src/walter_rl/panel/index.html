@@ -6,15 +6,17 @@
   <title>WaLTER</title>
   <style>
     :root {
-      color-scheme: light;
-      --bg: #f3f0e8;
-      --card: #fffdf8;
-      --ink: #1c1915;
-      --muted: #5c564c;
-      --line: #e3dcd0;
-      --accent: #0f6e56;
-      --accent-ink: #ffffff;
-      --danger: #8f2d2d;
+      color-scheme: dark;
+      --bg: #12100e;
+      --card: #1c1916;
+      --surface: #26221d;
+      --track: #0c0b09;
+      --ink: #f3efe6;
+      --muted: #a89f93;
+      --line: #3d362e;
+      --accent: #3dbe96;
+      --accent-ink: #0c1612;
+      --danger: #ef8b84;
       --radius: 12px;
     }
 
@@ -55,7 +57,7 @@
       grid-template-columns: 1fr 1fr;
       gap: 0.25rem;
       padding: 0.25rem;
-      background: #efeae1;
+      background: var(--track);
       border-radius: 10px;
     }
 
@@ -73,7 +75,7 @@
     .tabs button[aria-selected="true"] {
       background: var(--card);
       color: var(--ink);
-      box-shadow: 0 1px 2px rgb(28 25 21 / 8%);
+      box-shadow: 0 1px 2px rgb(0 0 0 / 40%);
     }
 
     .panel { margin-top: 1.25rem; }
@@ -116,7 +118,7 @@
       padding: 0.7rem 0.85rem;
       border: 1px solid var(--line);
       border-radius: 10px;
-      background: #fff;
+      background: var(--surface);
       cursor: pointer;
     }
 
@@ -167,7 +169,7 @@
       padding: 0 0.75rem;
       border: 1px solid var(--line);
       border-radius: 8px;
-      background: #fff;
+      background: var(--surface);
       color: inherit;
       font: inherit;
     }
@@ -208,7 +210,7 @@
       min-height: 44px;
       border: 1px solid var(--line);
       border-radius: 10px;
-      background: #fff;
+      background: var(--surface);
       color: inherit;
       font-weight: 600;
     }
@@ -242,7 +244,7 @@
     }
 
     button.primary:disabled {
-      background: #d9e4df;
+      background: #24302c;
       color: var(--muted);
       cursor: not-allowed;
     }
@@ -253,7 +255,7 @@
       padding: 0 1rem;
       border: 1px solid var(--danger);
       border-radius: 10px;
-      background: #fff;
+      background: var(--surface);
       color: var(--danger);
     }
 
@@ -292,8 +294,9 @@
       padding: 0.75rem;
       overflow: auto;
       border-radius: 8px;
-      background: #1c1915;
-      color: #f4f1ea;
+      border: 1px solid var(--line);
+      background: #0c0b09;
+      color: #e7e2d8;
       font: 0.8rem/1.4 ui-monospace, monospace;
       white-space: pre-wrap;
       word-break: break-word;
@@ -472,7 +475,7 @@
       <p class="status" id="job-status" role="status" aria-live="polite"></p>
       <div class="links">
         <a id="viewer-link" href="" hidden target="_blank" rel="noopener">Open viewer</a>
-        <a id="wandb-link" href="" hidden target="_blank" rel="noopener">Weights &amp; Biases</a>
+        <p id="train-log-dir" class="log-dir" hidden></p>
       </div>
       <button class="stop" id="stop" type="button" hidden>Stop</button>
       <details id="log-details">
@@ -812,7 +815,17 @@
       status.dataset.state = job.state;
       status.textContent = statusText(job);
       setLink($("viewer-link"), job.viewer_url);
-      setLink($("wandb-link"), job.wandb_url);
+      const logDir = $("train-log-dir");
+      if (job.log_dir) {
+        logDir.hidden = false;
+        logDir.textContent =
+          "TensorBoard log dir: " +
+          job.log_dir +
+          " — run: uv run tensorboard --logdir research/logs/training";
+      } else {
+        logDir.hidden = true;
+        logDir.textContent = "";
+      }
       $("stop").hidden = !running;
       renderLog(job.lines);
       if (job.state === "failed") $("log-details").open = true;

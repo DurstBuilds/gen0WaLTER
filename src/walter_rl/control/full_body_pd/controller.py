@@ -99,6 +99,7 @@ class FullBodyPdController:
     self._wheel_actuator = _wheel_actuator(robot)
     self._torque_is_rated = False
     self._speed_is_rated = False
+    self._tumble_command: torch.Tensor | None = None
 
   @property
   def gains(self) -> FullBodyPdGains:
@@ -107,8 +108,23 @@ class FullBodyPdController:
 
   @property
   def tumbling(self) -> torch.Tensor:
-    """Latched speed-lag tumble gate, one flag per environment."""
+    """Tumble latch, one flag per environment.
+
+    The stall-integral gate sets this unless ``set_tumble_command`` is in
+    use, in which case the external mask is the latch.
+    """
     return self._tumbling
+
+  def set_tumble_command(self, tumble: torch.Tensor | None) -> None:
+    """Skip the stall integral and use ``tumble`` as the latch.
+
+    ``None`` restores the speed-lag gate. A boolean mask replaces
+    ``_tumble_gate`` and still runs knee spin and settle.
+    """
+    if tumble is None:
+      self._tumble_command = None
+      return
+    self._tumble_command = tumble.to(device=self._env.device, dtype=torch.bool)
 
   def reset(self) -> None:
     """Clear the stall integral. Yaw has no accumulated heading."""
@@ -237,12 +253,25 @@ class FullBodyPdController:
 
   def _apply_tumble(self, actions: torch.Tensor, robot) -> None:
     """Spin every knee at ``tumble.rate`` once missed distance is large."""
+    if self._tumble_command is not None:
+      self._apply_commanded_tumble(actions, robot)
+      return
     if not _twist_flag(self._env, "tumbling_enabled", default=True):
       self._clear_tumble(slice(None))
       return
     self._integrate_speed_lag(robot)
     was_tumbling = self._tumbling.clone()
     self._tumbling = _tumble_gate(was_tumbling, self._speed_lag, self._gains.tumble)
+    self._advance_knee_reference(robot, was_tumbling)
+    self._settle_knees(robot, was_tumbling)
+    self._write_tumble(actions)
+    self._settling = self._settling & ~self._settle_arrived
+
+  def _apply_commanded_tumble(self, actions: torch.Tensor, robot) -> None:
+    """Latch tumbling from the external mask. The stall integral is unused."""
+    assert self._tumble_command is not None
+    was_tumbling = self._tumbling.clone()
+    self._tumbling = self._tumble_command
     self._advance_knee_reference(robot, was_tumbling)
     self._settle_knees(robot, was_tumbling)
     self._write_tumble(actions)

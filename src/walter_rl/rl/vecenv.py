@@ -72,3 +72,11 @@ class RslRlVecEnvWrapper(VecEnv):
   def close(self) -> None:
     """Close the wrapped environment."""
     self.env.close()
+
+
+class StateMachineVecEnv(RslRlVecEnvWrapper):
+  """Report a 1-D tumble toggle to PPO while PD still writes 16-D joints."""
+
+  def __init__(self, env: ManagerBasedRlEnv, clip_actions: float | None = None) -> None:
+    super().__init__(env, clip_actions=clip_actions)
+    self.num_actions = 1

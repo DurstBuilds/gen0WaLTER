@@ -7,6 +7,7 @@ import sys
 from pathlib import Path
 
 from walter_rl.assets.payloads import available_payloads
+from walter_rl.panel.paths import is_checkpoint_path
 
 _TASKS = ("flat", "rough", "rough-test", "stairs")
 _POLICIES = ("pd", "smooth-tumble", "checkpoint")
@@ -59,20 +60,19 @@ def summary_text(body: dict) -> str:
 
 
 def checkpoint_file(root: Path, raw: object) -> Path:
-  """Resolve a checkpoint under logs/rsl_rl."""
+  """Resolve a checkpoint under a known training log directory."""
   if not isinstance(raw, str) or not raw.strip():
     raise PanelError("Choose a checkpoint.")
-  logs = (root / "logs" / "rsl_rl").resolve()
   path = Path(raw)
   if not path.is_absolute():
     path = root / path
   path = path.resolve()
   if path.suffix != ".pt" or not path.is_file():
     raise PanelError("Checkpoint not found.")
-  try:
-    path.relative_to(logs)
-  except ValueError:
-    raise PanelError("Checkpoint must be under logs/rsl_rl.") from None
+  if not is_checkpoint_path(root, path):
+    raise PanelError(
+      "Checkpoint must be under research/logs/training or logs/rsl_rl."
+    )
   return path
 
 

@@ -15,6 +15,7 @@ from mjlab.sensor import ContactSensor
 from mjlab.utils.lab_api.math import quat_apply_inverse, wrap_to_pi, yaw_quat
 
 from walter_rl.control.full_body_pd.gains import TumbleGains
+from walter_rl.tasks.velocity.mdp.observations import motor_torques
 
 _DEFAULT_ASSET_CFG = SceneEntityCfg("robot")
 # Longitudinal sample of the torso scan. Matches ``_TERRAIN_SCAN_RESOLUTION``.
@@ -120,19 +121,66 @@ def gated_track_teacher_action(
   return track_teacher_action(env, std)
 
 
+def limb_torque_l2(
+  env: ManagerBasedRlEnv,
+  asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+  """Mean squared hip and knee torque, each divided by its rated torque.
+
+  Wheel torque is omitted. The value is near 1 when every limb motor sits
+  at its continuous rating.
+  """
+  asset: Entity = env.scene[asset_cfg.name]
+  rated = motor_torques(env, asset_cfg)
+  limb = _limb_actuator_mask(env, asset, rated)
+  return torch.mean(torch.square(rated[:, limb]), dim=-1)
+
+
+def _limb_actuator_mask(
+  env: ManagerBasedRlEnv,
+  asset: Entity,
+  rated: torch.Tensor,
+) -> torch.Tensor:
+  """True for actuators whose names are not wheels."""
+  mask = getattr(env, "_limb_torque_mask", None)
+  if isinstance(mask, torch.Tensor) and mask.shape[0] == rated.shape[-1]:
+    return mask
+  mask = torch.tensor(
+    ["wheel" not in name.lower() for name in asset.actuator_names],
+    device=rated.device,
+  )
+  env._limb_torque_mask = mask
+  return mask
+
+
+def policy_action_rate_l2(env: ManagerBasedRlEnv) -> torch.Tensor:
+  """Squared change in the 1-D tumble toggle, not the inner PD command."""
+  action = getattr(env, "policy_action", None)
+  previous = getattr(env, "prev_policy_action", None)
+  if not isinstance(action, torch.Tensor) or not isinstance(previous, torch.Tensor):
+    return torch.zeros(env.num_envs, device=env.device)
+  return torch.sum(torch.square(action - previous), dim=1)
+
+
 def predictive_knee_tumble(
   env: ManagerBasedRlEnv,
   command_name: str = "twist",
   asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
-  sensor_name: str = "terrain_scan",
+  sensor_name: str = "terrain_scan_front",
+  spacing: float = 1.0 / 7.0,
+  x_min: float = 0.25,
+  x_max: float = 1.25,
+  max_predictive_tumble_distance: float | None = None,
 ) -> torch.Tensor:
-  """Reward forward knee rate when a step is still ahead in the scan.
+  """Reward forward knee rate when a step is still ahead in the front scan.
 
   The command gate is 0 below the PD ``min_forward_cmd`` and otherwise the
   sign of the forward command. Knee rate is the mean of the positive rates
-  divided by ``TumbleGains.rate``. The scan gate is one minus the
+  divided by ``TumbleGains.rate``. ``column_height_step`` reads the front
+  grid in the head yaw frame, from ``x_min`` to the nearer of ``x_max`` and
+  ``max_predictive_tumble_distance``. The scan gate is one minus the
   teacher-match gate. A forward command and an open gate still pay when
-  measured speed along that command is at or below zero. A flat scan keeps
+  body-x speed along that command is at or below zero. A flat scan keeps
   the gate shut. The speed-lag integral is not used.
   """
   asset: Entity = env.scene[asset_cfg.name]
@@ -145,10 +193,47 @@ def predictive_knee_tumble(
   knee_vel = asset.data.joint_vel[:, asset_cfg.joint_ids]
   aligned = torch.relu(knee_vel * pref.unsqueeze(-1)).mean(dim=-1)
   aligned = aligned / _PD_TUMBLE_RATE
-  along, _cross = _spawn_axes_speed(env, asset)
-  tumble_gate = 1.0 - match_gate_from_step(forward_height_step(env, sensor_name))
+  along = asset.data.root_link_lin_vel_b[:, 0]
+  reach = _predictive_reach(x_max, max_predictive_tumble_distance)
+  step = column_height_step(env, sensor_name, spacing, x_min, reach)
+  tumble_gate = 1.0 - match_gate_from_step(step)
   progress = _stall_progress(along * pref, tumble_gate)
   return aligned * progress * tumble_gate
+
+
+def _predictive_reach(
+  x_max: float,
+  max_predictive_tumble_distance: float | None,
+) -> float:
+  """Nearer of the scan end and the predictive-tumble cap."""
+  if max_predictive_tumble_distance is None:
+    return x_max
+  return min(x_max, max_predictive_tumble_distance)
+
+
+def column_height_step(
+  env: ManagerBasedRlEnv,
+  sensor_name: str,
+  spacing: float,
+  x_min: float,
+  x_max: float,
+) -> torch.Tensor:
+  """Largest height jump between consecutive occupied scan columns.
+
+  Columns are ``round(x / spacing)`` in the sensor yaw frame, from
+  ``x_min`` through ``x_max``. Empty columns are skipped, so a missed ray
+  is not a step.
+  """
+  x, z, valid = _yaw_frame_scan(env, sensor_name)
+  usable = valid & torch.isfinite(x) & torch.isfinite(z)
+  first = int(round(x_min / spacing))
+  count = int(round((x_max - x_min) / spacing)) + 1
+  index = torch.round(x / spacing).long() - first
+  occupied = usable & (index >= 0) & (index < count)
+  columns = [
+    _masked_median(z, occupied & (index == column)) for column in range(count)
+  ]
+  return _max_occupied_jump(torch.stack(columns, dim=-1))
 
 
 def _yaw_frame_scan(
@@ -339,6 +424,61 @@ def spawn_heading_error(
   error = wrap_to_pi(root_yaw(asset.data.root_link_quat_w) - env.spawn_yaw_w).abs()
   upright = -asset.data.projected_gravity_b[:, 2] >= _UPRIGHT_FOR_HEADING
   return torch.where(upright, error, torch.zeros_like(error))
+
+
+def track_body_forward(
+  env: ManagerBasedRlEnv,
+  std: float,
+  command_name: str,
+  asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+  """Reward body-frame forward speed matching the commanded speed.
+
+  Lateral and vertical velocity are left out. A climb or a turn moves the
+  root off the forward axis without missing this term.
+  """
+  asset: Entity = env.scene[asset_cfg.name]
+  command = env.command_manager.get_command(command_name)
+  assert command is not None, f"Command '{command_name}' not found."
+  error = torch.square(command[:, 0] - asset.data.root_link_lin_vel_b[:, 0])
+  return torch.exp(-error / std**2)
+
+
+def stuck_x_velocity(
+  env: ManagerBasedRlEnv,
+  std: float,
+  command_name: str,
+  asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+  """Narrow penalty around zero body-x speed while a forward command is on.
+
+  The kernel is 1 at zero speed and falls off with width ``std``. A command
+  at or below zero returns 0, so a requested stop is not punished.
+  """
+  asset: Entity = env.scene[asset_cfg.name]
+  command = env.command_manager.get_command(command_name)
+  assert command is not None, f"Command '{command_name}' not found."
+  speed = asset.data.root_link_lin_vel_b[:, 0]
+  kernel = torch.exp(-speed.square() / std**2)
+  moving = command[:, 0] > 0.0
+  return torch.where(moving, kernel, torch.zeros_like(kernel))
+
+
+def track_yaw_rate(
+  env: ManagerBasedRlEnv,
+  std: float,
+  command_name: str,
+  asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+  """Reward body yaw rate matching the commanded yaw rate.
+
+  Roll and pitch rate are left out, so a tumble does not miss this term.
+  """
+  asset: Entity = env.scene[asset_cfg.name]
+  command = env.command_manager.get_command(command_name)
+  assert command is not None, f"Command '{command_name}' not found."
+  error = torch.square(command[:, 2] - asset.data.root_link_ang_vel_b[:, 2])
+  return torch.exp(-error / std**2)
 
 
 def track_lin_vel_xy(
