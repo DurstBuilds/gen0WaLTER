@@ -104,6 +104,27 @@ def forward_height_step(
   return forward_scan_step(x, z, valid)
 
 
+def forward_match_step(env: ManagerBasedRlEnv) -> torch.Tensor:
+  """Largest forward height jump for teacher match and curriculum gates.
+
+  The legacy teacher scene uses one torso grid named ``terrain_scan``. The
+  split-scan stack reads the head-mounted ``terrain_scan_front`` grid instead.
+  """
+  if "terrain_scan" in env.scene.sensors:
+    return forward_height_step(env)
+  sensor = env.scene["terrain_scan_front"]
+  pattern = sensor.cfg.pattern
+  half = pattern.size[0] / 2.0
+  center = pattern.offset[0]
+  return column_height_step(
+    env,
+    sensor.cfg.name,
+    pattern.resolution,
+    center - half,
+    center + half,
+  )
+
+
 def gated_track_teacher_action(
   env: ManagerBasedRlEnv,
   std: float,
@@ -154,7 +175,11 @@ def _limb_actuator_mask(
 
 
 def policy_action_rate_l2(env: ManagerBasedRlEnv) -> torch.Tensor:
-  """Squared change in the 1-D tumble toggle, not the inner PD command."""
+  """Squared change in the policy action, not the inner PD command.
+
+  Both columns are on a scale of about one: the tumble toggle, including
+  the off-dwell sign, and the tank hip offset in units of 30 degrees.
+  """
   action = getattr(env, "policy_action", None)
   previous = getattr(env, "prev_policy_action", None)
   if not isinstance(action, torch.Tensor) or not isinstance(previous, torch.Tensor):
@@ -172,16 +197,17 @@ def predictive_knee_tumble(
   x_max: float = 1.25,
   max_predictive_tumble_distance: float | None = None,
 ) -> torch.Tensor:
-  """Reward forward knee rate when a step is still ahead in the front scan.
+  """Reward forward knee rate when an upward step is still ahead.
 
   The command gate is 0 below the PD ``min_forward_cmd`` and otherwise the
   sign of the forward command. Knee rate is the mean of the positive rates
-  divided by ``TumbleGains.rate``. ``column_height_step`` reads the front
-  grid in the head yaw frame, from ``x_min`` to the nearer of ``x_max`` and
-  ``max_predictive_tumble_distance``. The scan gate is one minus the
-  teacher-match gate. A forward command and an open gate still pay when
-  body-x speed along that command is at or below zero. A flat scan keeps
-  the gate shut. The speed-lag integral is not used.
+  divided by ``TumbleGains.rate``. The front grid is read in the head yaw
+  frame, from ``x_min`` to the nearer of ``x_max`` and
+  ``max_predictive_tumble_distance``. The scan gate opens only for a rise:
+  shut at or below 0.04 m and fully open at or above 0.08 m. A drop,
+  including downstairs, keeps it shut. A forward command and an open gate
+  still pay when body-x speed along that command is at or below zero. A
+  flat scan keeps the gate shut. The speed-lag integral is not used.
   """
   asset: Entity = env.scene[asset_cfg.name]
   command = env.command_manager.get_command(command_name)
@@ -195,8 +221,8 @@ def predictive_knee_tumble(
   aligned = aligned / _PD_TUMBLE_RATE
   along = asset.data.root_link_lin_vel_b[:, 0]
   reach = _predictive_reach(x_max, max_predictive_tumble_distance)
-  step = column_height_step(env, sensor_name, spacing, x_min, reach)
-  tumble_gate = 1.0 - match_gate_from_step(step)
+  heights = _column_heights(env, sensor_name, spacing, x_min, reach)
+  tumble_gate = 1.0 - match_gate_from_step(_max_occupied_rise(heights))
   progress = _stall_progress(along * pref, tumble_gate)
   return aligned * progress * tumble_gate
 
@@ -224,6 +250,40 @@ def column_height_step(
   ``x_min`` through ``x_max``. Empty columns are skipped, so a missed ray
   is not a step.
   """
+  return _max_occupied_jump(_column_heights(env, sensor_name, spacing, x_min, x_max))
+
+
+def downhill_tumble(
+  env: ManagerBasedRlEnv,
+  sensor_name: str = "terrain_scan_front",
+  spacing: float = 1.0 / 7.0,
+  x_min: float = 0.25,
+  x_max: float = 1.25,
+  asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+  """Downward pitch, in radians, while tumbling toward lower ground.
+
+  Pitch is 0 upright and negative when the nose points down. The return is
+  that downward angle while the tumble latch is on and the forward scan
+  falls away. The scan gate is 0 at a 4 cm drop and 1 at 8 cm, the same
+  band as a stair face. A rise, a level or nose-up torso, or an off latch
+  returns 0, so a climb tumble is not charged. The reward weight supplies
+  the sign.
+  """
+  asset: Entity = env.scene[asset_cfg.name]
+  downward = torch.relu(-_torso_pitch(asset.data.projected_gravity_b))
+  heights = _column_heights(env, sensor_name, spacing, x_min, x_max)
+  return downward * _descent_gate(_max_occupied_drop(heights)) * _applied_tumble(env)
+
+
+def _column_heights(
+  env: ManagerBasedRlEnv,
+  sensor_name: str,
+  spacing: float,
+  x_min: float,
+  x_max: float,
+) -> torch.Tensor:
+  """Median height of each forward column. Empty columns are NaN."""
   x, z, valid = _yaw_frame_scan(env, sensor_name)
   usable = valid & torch.isfinite(x) & torch.isfinite(z)
   first = int(round(x_min / spacing))
@@ -233,7 +293,301 @@ def column_height_step(
   columns = [
     _masked_median(z, occupied & (index == column)) for column in range(count)
   ]
-  return _max_occupied_jump(torch.stack(columns, dim=-1))
+  return torch.stack(columns, dim=-1)
+
+
+def _torso_pitch(gravity_b: torch.Tensor) -> torch.Tensor:
+  """Pitch from upright, in radians. Negative when the nose points down.
+
+  ``projected_gravity_b.x`` is positive nose-down and ``.z`` is about -1
+  when the torso is level. The angle is ``-atan2(gx, -gz)``.
+  """
+  return -torch.atan2(gravity_b[:, 0], -gravity_b[:, 2])
+
+
+def _descent_gate(drop: torch.Tensor) -> torch.Tensor:
+  """Open from 0 at a 4 cm step to 1 at an 8 cm step."""
+  return _open_gate(drop)
+
+
+def _open_gate(step: torch.Tensor) -> torch.Tensor:
+  """Ramp from shut at 4 cm to fully open at 8 cm."""
+  span = _MATCH_STEP_OFF_M - _MATCH_STEP_FULL_M
+  return ((step - _MATCH_STEP_FULL_M) / span).clamp(0.0, 1.0)
+
+
+# Nominal axle x in the back-torso frame, from the FS kinematic tree.
+_REAR_WHEEL_X = -0.027 - 0.1137
+_FRONT_WHEEL_X = 0.1754 + 0.338 + 0.1137
+_FOOTPRINT_BEHIND_REAR_M = 0.25
+_FOOTPRINT_PAST_FRONT_M = 0.75
+_FOOTPRINT_AHEAD_M = 0.35
+_FOOTPRINT_RESOLUTION_M = 0.05
+_FOOTPRINT_WIDTH_M = 0.4
+# Snapped so the 5 cm grid covers both margins with a sample on each end.
+_FOOTPRINT_X_START = -0.40
+_FOOTPRINT_X_END = 1.40
+_CLIMB_SPEED_SCALE_MPS = 0.3
+_PROGRESS_MIN_CMD_MPS = 0.1
+_TORSO_TOUCH_N = 1.0
+
+
+def footprint_scan_pattern() -> dict[str, tuple[float, float] | float]:
+  """Grid arguments for the privileged footprint height scan.
+
+  The field runs from 0.25 m behind the rear axles to 0.75 m past the front
+  axles. The center offset is in the back-torso frame.
+  """
+  size_x = _FOOTPRINT_X_END - _FOOTPRINT_X_START
+  offset_x = 0.5 * (_FOOTPRINT_X_START + _FOOTPRINT_X_END)
+  return {
+    "size": (size_x, _FOOTPRINT_WIDTH_M),
+    "resolution": _FOOTPRINT_RESOLUTION_M,
+    "offset": (offset_x, 0.0),
+  }
+
+
+def forward_progress(
+  env: ManagerBasedRlEnv,
+  command_name: str = "twist",
+  asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+  """Body-x speed as a fraction of the forward command, capped at that command.
+
+  Commands below 0.1 m/s pay nothing, so a requested stop is not a target.
+  Any forward speed beats a stall, unlike the exponential tracking kernel.
+  """
+  asset: Entity = env.scene[asset_cfg.name]
+  command = env.command_manager.get_command(command_name)
+  assert command is not None, f"Command '{command_name}' not found."
+  cmd = command[:, 0]
+  speed = asset.data.root_link_lin_vel_b[:, 0]
+  active = cmd >= _PROGRESS_MIN_CMD_MPS
+  progress = speed.clamp(min=-cmd, max=cmd) / cmd.clamp(min=1e-6)
+  return torch.where(active, progress, torch.zeros_like(progress))
+
+
+def climb_tumble(
+  env: ManagerBasedRlEnv,
+  command_name: str = "twist",
+  sensor_name: str = "footprint_scan",
+  asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+  """Forward knee rate while a riser is ahead of or under the wheels.
+
+  Knee rate is the command-aligned positive rate divided by the tumble
+  rate. The scan gate stays open until the rear axles clear the last riser.
+  Credit grows with forward speed and does not jump at a stall.
+  """
+  asset: Entity = env.scene[asset_cfg.name]
+  command = env.command_manager.get_command(command_name)
+  assert command is not None, f"Command '{command_name}' not found."
+  aligned = _aligned_knee_rate(asset, command[:, 0], asset_cfg)
+  gate = climb_gate(env, sensor_name)
+  speed = asset.data.root_link_lin_vel_b[:, 0].clamp(min=0.0)
+  factor = 0.5 + 0.5 * (speed / _CLIMB_SPEED_SCALE_MPS).clamp(0.0, 1.0)
+  moving = command[:, 0] >= _PROGRESS_MIN_CMD_MPS
+  return torch.where(moving, aligned * gate * factor, torch.zeros_like(aligned))
+
+
+def climb_gate(
+  env: ManagerBasedRlEnv,
+  sensor_name: str = "footprint_scan",
+) -> torch.Tensor:
+  """Open while a riser is within 0.35 m ahead or still under the robot.
+
+  The gate is shut at a 4 cm rise and fully open at 8 cm. A 0.45 slope
+  changes about 2.3 cm per 5 cm sample, so it stays shut.
+  """
+  under, ahead = _footprint_rises(env, sensor_name)
+  return torch.maximum(_open_gate(under), _open_gate(ahead))
+
+
+def unneeded_tumble(
+  env: ManagerBasedRlEnv,
+  sensor_name: str = "footprint_scan",
+) -> torch.Tensor:
+  """Applied tumble when no riser sits between the rear axles and the lookahead.
+
+  The charge fades as the rise gate opens, so a real step is not penalized.
+  Flats, slopes, waves, and declines stay at a full charge.
+  """
+  rise = _span_step(env, sensor_name, "excuse", rise=True)
+  return _applied_tumble(env) * (1.0 - _open_gate(rise))
+
+
+def footprint_downhill_tumble(
+  env: ManagerBasedRlEnv,
+  sensor_name: str = "footprint_scan",
+  asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+  """Nose-down pitch, in radians, while tumbling toward a drop under the body.
+
+  The drop is read from the footprint scan, from the rear axles to 0.75 m
+  past the front axles. A rise, a level torso, or an off latch returns 0.
+  """
+  asset: Entity = env.scene[asset_cfg.name]
+  downward = torch.relu(-_torso_pitch(asset.data.projected_gravity_b))
+  drop = _span_step(env, sensor_name, "excuse", rise=False)
+  return downward * _open_gate(drop) * _applied_tumble(env)
+
+
+def torso_contact_flag(
+  env: ManagerBasedRlEnv,
+  sensor_name: str = "torso_ground_touch",
+) -> torch.Tensor:
+  """1 when the belly touched during this policy step, else 0."""
+  sensor: ContactSensor = env.scene[sensor_name]
+  data = sensor.data
+  if data.force_history is not None:
+    magnitude = torch.linalg.vector_norm(data.force_history, dim=-1)
+    return (magnitude > _TORSO_TOUCH_N).any(dim=-1).any(dim=-1).float()
+  assert data.found is not None
+  return torch.any(data.found > 0, dim=-1).float()
+
+
+def footprint_height_profile(
+  env: ManagerBasedRlEnv,
+  sensor_name: str = "footprint_scan",
+) -> torch.Tensor:
+  """Median ground height along the footprint, relative to the scan frame.
+
+  Missed rays are 0. Shape is ``(num_envs, num_samples)``.
+  """
+  profile, _xs, frame_z = _footprint_profile(env, sensor_name)
+  relative = profile - frame_z.unsqueeze(-1)
+  return torch.nan_to_num(relative, nan=0.0, posinf=0.0, neginf=0.0)
+
+
+def _aligned_knee_rate(
+  asset: Entity,
+  cmd_x: torch.Tensor,
+  asset_cfg: SceneEntityCfg,
+) -> torch.Tensor:
+  """Positive knee rate along the command, divided by the tumble rate."""
+  pref = torch.sign(cmd_x)
+  has_command = cmd_x.abs() >= _PROGRESS_MIN_CMD_MPS
+  pref = torch.where(has_command, pref, torch.zeros_like(pref))
+  knee_vel = asset.data.joint_vel[:, asset_cfg.joint_ids]
+  aligned = torch.relu(knee_vel * pref.unsqueeze(-1)).mean(dim=-1)
+  return aligned / _PD_TUMBLE_RATE
+
+
+def _footprint_rises(
+  env: ManagerBasedRlEnv,
+  sensor_name: str,
+) -> tuple[torch.Tensor, torch.Tensor]:
+  """Largest rise under the wheelbase and within 0.35 m ahead of the front axles."""
+  under = _span_step(env, sensor_name, "under", rise=True)
+  ahead = _span_step(env, sensor_name, "ahead", rise=True)
+  return under, ahead
+
+
+def _span_step(
+  env: ManagerBasedRlEnv,
+  sensor_name: str,
+  span: str,
+  *,
+  rise: bool,
+) -> torch.Tensor:
+  """Largest consecutive rise or drop on one footprint span."""
+  profile, _xs, _frame_z = _footprint_profile(env, sensor_name)
+  start, end = _footprint_spans(env, sensor_name)[span]
+  if end <= start:
+    return torch.zeros(profile.shape[0], device=profile.device)
+  window = profile[:, start : end + 1]
+  delta = window[:, 1:] - window[:, :-1]
+  signed = delta if rise else -delta
+  finite = torch.isfinite(signed)
+  usable = torch.where(finite, signed, torch.zeros_like(signed))
+  return usable.clamp(min=0.0).amax(dim=-1)
+
+
+def _footprint_profile(
+  env: ManagerBasedRlEnv,
+  sensor_name: str,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+  """Median hit height per longitudinal sample, the sample x, and frame z."""
+  sensor = env.scene[sensor_name]
+  xs, n_y = _footprint_axes(env, sensor_name)
+  hits = sensor.data.hit_pos_w
+  valid = sensor.data.distances >= 0
+  n_x = xs.numel()
+  z = hits[..., 2].view(-1, n_y, n_x)
+  mask = valid.view(-1, n_y, n_x)
+  frame_z = sensor.data.frame_pos_w[:, 0, 2]
+  return _median_over_width(z, mask), xs, frame_z
+
+
+def _footprint_axes(env: ManagerBasedRlEnv, sensor_name: str) -> tuple[torch.Tensor, int]:
+  """Sample x coordinates and the lateral ray count for ``sensor_name``."""
+  cached = getattr(env, "_footprint_axes", None)
+  if isinstance(cached, tuple) and cached[0] == sensor_name:
+    return cached[1], cached[2]
+  pattern = env.scene[sensor_name].cfg.pattern
+  xs = _grid_axis(pattern.size[0], pattern.resolution, pattern.offset[0], env.device)
+  ys = _grid_axis(pattern.size[1], pattern.resolution, pattern.offset[1], env.device)
+  env._footprint_axes = (sensor_name, xs, ys.numel())
+  return xs, ys.numel()
+
+
+def _grid_axis(size: float, resolution: float, offset: float, device: str) -> torch.Tensor:
+  """Match ``GridPatternCfg.generate_rays`` along one axis."""
+  axis = torch.arange(
+    -size / 2,
+    size / 2 + resolution * 0.5,
+    resolution,
+    device=device,
+    dtype=torch.float32,
+  )
+  return axis + offset
+
+
+def _median_over_width(z: torch.Tensor, valid: torch.Tensor) -> torch.Tensor:
+  """Median across the width axis. Empty samples are NaN."""
+  filled = torch.where(valid, z, torch.full_like(z, float("inf")))
+  ordered = filled.sort(dim=1).values
+  count = valid.sum(dim=1)
+  last = z.shape[1] - 1
+  lower = ((count - 1) // 2).clamp(0, last)
+  upper = (count // 2).clamp(0, last)
+  batch = torch.arange(z.shape[0], device=z.device)[:, None]
+  column = torch.arange(z.shape[2], device=z.device)[None, :]
+  median = (ordered[batch, lower, column] + ordered[batch, upper, column]) * 0.5
+  return torch.where(count > 0, median, torch.full_like(median, float("nan")))
+
+
+def _footprint_spans(env: ManagerBasedRlEnv, sensor_name: str) -> dict[str, tuple[int, int]]:
+  """Inclusive sample ranges measured from the nominal wheel axles."""
+  cached = getattr(env, "_footprint_spans", None)
+  if isinstance(cached, dict) and cached.get("sensor") == sensor_name:
+    return cached
+  xs, _n_y = _footprint_axes(env, sensor_name)
+  spans = {
+    "sensor": sensor_name,
+    "under": _sample_span(xs, _REAR_WHEEL_X, _FRONT_WHEEL_X),
+    "ahead": _sample_span(xs, _FRONT_WHEEL_X, _FRONT_WHEEL_X + _FOOTPRINT_AHEAD_M),
+    "excuse": _sample_span(xs, _REAR_WHEEL_X, _FRONT_WHEEL_X + _FOOTPRINT_PAST_FRONT_M),
+  }
+  env._footprint_spans = spans
+  return spans
+
+
+def _sample_span(xs: torch.Tensor, start: float, end: float) -> tuple[int, int]:
+  """First sample at or after ``start`` through the last at or before ``end``."""
+  host = xs.detach().cpu()
+  first = int(torch.searchsorted(host, torch.tensor(start)).item())
+  last = int(torch.searchsorted(host, torch.tensor(end), right=True).item()) - 1
+  last_index = xs.numel() - 1
+  return max(0, min(first, last_index)), max(0, min(last, last_index))
+
+
+def _applied_tumble(env: ManagerBasedRlEnv) -> torch.Tensor:
+  """1 while the state-machine tumble latch is on, else 0."""
+  applied = getattr(env, "_tumble_applied", None)
+  if not isinstance(applied, torch.Tensor):
+    return torch.zeros(env.num_envs, device=env.device)
+  return applied.to(dtype=torch.float32).reshape(env.num_envs)
 
 
 def _yaw_frame_scan(
@@ -288,6 +642,52 @@ def _stall_progress(along: torch.Tensor, tumble_gate: torch.Tensor) -> torch.Ten
   progress = torch.relu(along).clamp(max=1.0)
   stalled_on_step = (along <= 0) & (tumble_gate > 0)
   return torch.where(stalled_on_step, torch.ones_like(progress), progress)
+
+
+def _max_occupied_rise(heights: torch.Tensor) -> torch.Tensor:
+  """Largest rise between consecutive finite columns, in meters.
+
+  Columns run from near to far. A drop does not add. Empty columns are
+  skipped, so a missed ray is not a rise.
+  """
+  rise = torch.zeros(heights.shape[0], device=heights.device, dtype=heights.dtype)
+  previous = torch.zeros_like(rise)
+  has_previous = torch.zeros(
+    heights.shape[0], dtype=torch.bool, device=heights.device
+  )
+  for index in range(heights.shape[-1]):
+    column = heights[:, index]
+    is_occupied = torch.isfinite(column)
+    filled = torch.where(is_occupied, column, previous)
+    climb = filled - previous
+    can_compare = has_previous & is_occupied
+    rise = torch.where(can_compare, torch.maximum(rise, climb), rise)
+    previous = filled
+    has_previous = has_previous | is_occupied
+  return rise
+
+
+def _max_occupied_drop(heights: torch.Tensor) -> torch.Tensor:
+  """Largest fall between consecutive finite columns, in meters.
+
+  Columns run from near to far. A rise does not add. Empty columns are
+  skipped, so a missed ray is not a drop.
+  """
+  drop = torch.zeros(heights.shape[0], device=heights.device, dtype=heights.dtype)
+  previous = torch.zeros_like(drop)
+  has_previous = torch.zeros(
+    heights.shape[0], dtype=torch.bool, device=heights.device
+  )
+  for index in range(heights.shape[-1]):
+    column = heights[:, index]
+    is_occupied = torch.isfinite(column)
+    filled = torch.where(is_occupied, column, previous)
+    fall = previous - filled
+    can_compare = has_previous & is_occupied
+    drop = torch.where(can_compare, torch.maximum(drop, fall), drop)
+    previous = filled
+    has_previous = has_previous | is_occupied
+  return drop
 
 
 def _max_occupied_jump(heights: torch.Tensor) -> torch.Tensor:

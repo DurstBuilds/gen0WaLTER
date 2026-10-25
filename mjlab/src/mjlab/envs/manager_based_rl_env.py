@@ -432,15 +432,7 @@ class ManagerBasedRlEnv:
       )
 
     self.extras["log"] = dict()
-    self.action_manager.process_action(action.to(self.device))
-
-    for _ in range(self.cfg.decimation):
-      self._sim_step_counter += 1
-      self.action_manager.apply_action()
-      self.scene.write_data_to_sim()
-      self.sim.step()
-      self.scene.update(dt=self.physics_dt)
-      self.metrics_manager.compute_substep()
+    self._apply_action_and_simulate(action)
 
     # Update env counters.
     self.episode_length_buf += 1
@@ -504,6 +496,26 @@ class ManagerBasedRlEnv:
       self.reset_time_outs,
       self.extras,
     )
+
+  def _apply_action_and_simulate(self, action: torch.Tensor) -> None:
+    """Process ``action`` and run ``decimation`` physics substeps.
+
+    Subclasses can hold a slower policy command and retarget the actuators
+    between groups of substeps. The default applies one action for the whole
+    environment step.
+    """
+    self.action_manager.process_action(action.to(self.device))
+    for _ in range(self.cfg.decimation):
+      self._physics_substep()
+
+  def _physics_substep(self) -> None:
+    """Apply the held action and advance the simulator by one physics step."""
+    self._sim_step_counter += 1
+    self.action_manager.apply_action()
+    self.scene.write_data_to_sim()
+    self.sim.step()
+    self.scene.update(dt=self.physics_dt)
+    self.metrics_manager.compute_substep()
 
   def get_observations(self) -> dict:
     return self.observation_manager.compute()

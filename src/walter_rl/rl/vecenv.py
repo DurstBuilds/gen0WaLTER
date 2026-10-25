@@ -8,6 +8,8 @@ from tensordict import TensorDict
 
 from mjlab.envs import ManagerBasedRlEnv, ManagerBasedRlEnvCfg
 
+from walter_rl.rl.teacher_env import POLICY_ACTION_DIM
+
 
 class RslRlVecEnvWrapper(VecEnv):
   """Present an mjlab environment as the vector env rsl-rl 5.4 expects."""
@@ -75,8 +77,24 @@ class RslRlVecEnvWrapper(VecEnv):
 
 
 class StateMachineVecEnv(RslRlVecEnvWrapper):
-  """Report a 1-D tumble toggle to PPO while PD still writes 16-D joints."""
+  """Report tumble and tank hip to PPO while PD still writes 16-D joints.
+
+  Action 0 is the tumble toggle. Action 1 is the tank hip on ``[-1, 1]``.
+  The environment maps that sample to 0–30 degrees.
+  """
 
   def __init__(self, env: ManagerBasedRlEnv, clip_actions: float | None = None) -> None:
     super().__init__(env, clip_actions=clip_actions)
-    self.num_actions = 1
+    self.num_actions = 2
+
+
+class TeacherStudentVecEnv(RslRlVecEnvWrapper):
+  """Report the 17-D teacher policy while the plant stays 16-D.
+
+  The policy vector is hips, wheels, drive_state, then knee positions.
+  ``TeacherStudentEnv`` decodes that sample into the joint command.
+  """
+
+  def __init__(self, env: ManagerBasedRlEnv, clip_actions: float | None = None) -> None:
+    super().__init__(env, clip_actions=clip_actions)
+    self.num_actions = POLICY_ACTION_DIM

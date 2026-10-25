@@ -1,4 +1,4 @@
-"""Velocity env whose policy only toggles tumbling on the PD controller."""
+"""Velocity env whose policy toggles tumbling and sets the tank hip."""
 
 from __future__ import annotations
 
@@ -7,21 +7,30 @@ import math
 import torch
 
 from mjlab.envs import ManagerBasedRlEnv, ManagerBasedRlEnvCfg
-from mjlab.envs.types import VecEnvStepReturn
 
 from walter_rl.control.full_body_pd.controller import FullBodyPdController
 
 _MIN_TUMBLE_ON_S = 0.5
+_POLICY_ACTION_DIM = 2
+_HIP_COLUMN = 1
+_MAX_TANK_HIP_DEG = 30.0
+_MAX_TANK_HIP_RAD = math.radians(_MAX_TANK_HIP_DEG)
+# Physics stays at 200 Hz. The PD retargets every 4 substeps (50 Hz).
+_PD_DECIMATION = 4
+_PD_CONTROL_DT = 0.02
 
 
 class StateMachineEnv(ManagerBasedRlEnv):
-  """Apply PD joint commands. The policy action is a 1-D tumble toggle.
+  """Apply PD joint commands. The policy action is tumble plus tank hip.
 
   ``policy_action[:, 0] > 0`` latches tumbling. Efficient wheel drive runs
   when the toggle is off. Each edge is held for ``_MIN_TUMBLE_ON_S``: tumble
   stays on after a rising edge, and after a falling edge the stored output
-  is forced negative so a new tumble cannot start. The stall-integral gate
-  is not used.
+  is forced negative so a new tumble cannot start. Column 1 is the tank hip
+  on ``[-1, 1]``, mapped to 0–30 degrees. The latch updates once per policy
+  step. The PD retargets five times inside that step. Tank Mode stays on
+  and the tank knee command stays at zero. The stall-integral gate is not
+  used.
   """
 
   def __init__(
@@ -31,8 +40,16 @@ class StateMachineEnv(ManagerBasedRlEnv):
     render_mode: str | None = None,
   ) -> None:
     super().__init__(cfg, device=device, render_mode=render_mode)
-    self._teacher = FullBodyPdController(self)
-    self.policy_action = torch.zeros(self.num_envs, 1, device=self.device)
+    if self.cfg.decimation % _PD_DECIMATION != 0:
+      raise ValueError(
+        f"Policy decimation {self.cfg.decimation} must be a multiple of "
+        f"the PD decimation {_PD_DECIMATION}."
+      )
+    self._pd_ticks_per_policy_step = self.cfg.decimation // _PD_DECIMATION
+    self._teacher = FullBodyPdController(self, control_dt=_PD_CONTROL_DT)
+    self.policy_action = torch.zeros(
+      self.num_envs, _POLICY_ACTION_DIM, device=self.device
+    )
     self.prev_policy_action = torch.zeros_like(self.policy_action)
     self._tumble_hold = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
     self._tumble_off_hold = torch.zeros(
@@ -42,20 +59,54 @@ class StateMachineEnv(ManagerBasedRlEnv):
       self.num_envs, dtype=torch.bool, device=self.device
     )
     self._min_tumble_steps = max(1, math.ceil(_MIN_TUMBLE_ON_S / self.step_dt))
+    self._apply_tank_pose()
 
   @property
   def teacher(self) -> FullBodyPdController:
     """PD controller that writes hips, knees, and wheels each step."""
     return self._teacher
 
-  def step(self, action: torch.Tensor) -> VecEnvStepReturn:
-    """Latch tumbling from the scalar action, then step the PD command."""
-    toggle = action.reshape(self.num_envs, 1).to(device=self.device)
+  def _apply_action_and_simulate(self, action: torch.Tensor) -> None:
+    """Latch the policy command once, then run the PD at its own rate."""
+    tumble = self._latch_policy_command(action)
+    self._teacher.skip_fresh_clear = False
+    for _ in range(self._pd_ticks_per_policy_step):
+      self._teacher.set_tumble_command(tumble)
+      self.action_manager.process_action(self._teacher.act())
+      for _ in range(_PD_DECIMATION):
+        self._physics_substep()
+      self._teacher.skip_fresh_clear = True
+
+  def _latch_policy_command(self, action: torch.Tensor) -> torch.Tensor:
+    """Store the 2-D policy action and return the latched tumble mask."""
+    command = action.reshape(self.num_envs, _POLICY_ACTION_DIM)
+    command = command.to(device=self.device)
     self._reset_toggle_history()
     self.prev_policy_action = self.policy_action.clone()
-    self.policy_action = toggle.detach().clone()
-    self._teacher.set_tumble_command(self._tumble_command())
-    return super().step(self._teacher.act())
+    self.policy_action = command.detach().clone()
+    self._write_hip_offset()
+    self._apply_tank_pose()
+    return self._tumble_command()
+
+  def _write_hip_offset(self) -> None:
+    """Map the hip sample from ``[-1, 1]`` onto ``[0, 1]``.
+
+    The Beta policy uses the whole interval. Zero is 15 degrees and the
+    ends are 0 and 30 degrees.
+    """
+    hip = (self.policy_action[:, _HIP_COLUMN] + 1.0) * 0.5
+    self.policy_action[:, _HIP_COLUMN] = hip.clamp(0.0, 1.0)
+
+  def _apply_tank_pose(self) -> None:
+    """Hold Tank Mode on, freeze the knee command, and write the hip offset.
+
+    Column 1 is 0 at 0 degrees and 1 at 30 degrees. Rewriting the pose here
+    runs before the PD read, so a later play-slider update cannot win.
+    """
+    twist = self.command_manager.get_term("twist")
+    twist.tank_mode = True
+    twist.knee_angle.zero_()
+    twist.hip_angle[:] = self.policy_action[:, _HIP_COLUMN] * _MAX_TANK_HIP_RAD
 
   def _tumble_command(self) -> torch.Tensor:
     """Hold each tumble edge for the minimum dwell."""
@@ -100,7 +151,7 @@ class StateMachineEnv(ManagerBasedRlEnv):
     self._clear_tumble_latch(slice(None) if env_ids is None else env_ids)
 
   def _reset_toggle_history(self) -> None:
-    """Zero the stored toggle on environments that just reset."""
+    """Zero the stored action on environments that just reset."""
     fresh = self.episode_length_buf == 0
     self.prev_policy_action[fresh] = 0.0
     self.policy_action[fresh] = 0.0

@@ -4,10 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-_CHECKPOINT_LOG_ROOTS = (
-  Path("research/logs/training"),
-  Path("logs/rsl_rl"),
-)
+_CHECKPOINT_LOG_ROOT = Path("logs/rsl_rl")
 
 
 def repo_root() -> Path:
@@ -17,7 +14,7 @@ def repo_root() -> Path:
 
 def checkpoint_log_roots(root: Path) -> tuple[Path, ...]:
   """Directories that hold ``<experiment>/<timestamp>/model_*.pt`` runs."""
-  return tuple((root / rel).resolve() for rel in _CHECKPOINT_LOG_ROOTS)
+  return ((root / _CHECKPOINT_LOG_ROOT).resolve(),)
 
 
 def is_checkpoint_path(root: Path, path: Path) -> bool:

@@ -1,7 +1,7 @@
 """PD loops that fill the Walter action vector, with level hips while tumbling.
 
 Hips, knees, and wheels use the same action terms as the velocity task.
-``head_joint`` is fixed at 0 degrees and is not an action.
+``waist`` is fixed at 0 degrees and is not an action.
 While the knees tumble or settle, the hips hold a flat-ground contact
 height instead of zeroing torso pitch.
 """
@@ -34,13 +34,13 @@ _LEVEL_HIP_NEWTON_STEPS = 4
 _HIP_HEIGHT_SAMPLES = 33
 _SLOPE_EPSILON = 1e-4
 
-_FRONT_HIPS = ("head_left_thigh_joint", "head_right_thigh_joint")
-_REAR_HIPS = ("torso_left_thigh_joint", "torso_right_thigh_joint")
-_LEFT_KNEES = ("torso_left_thigh_shin_joint", "head_left_thigh_shin_joint")
-_RIGHT_KNEES = ("torso_right_thigh_shin_joint", "head_right_thigh_shin_joint")
-_LEFT_THIGHS = ("torso_left_thigh", "head_left_thigh")
-_RIGHT_THIGHS = ("torso_right_thigh", "head_right_thigh")
-_WAIST = "head_joint"
+_FRONT_HIPS = ("fl_hip", "fr_hip")
+_REAR_HIPS = ("bl_hip", "br_hip")
+_LEFT_KNEES = ("bl_knee", "fl_knee")
+_RIGHT_KNEES = ("br_knee", "fr_knee")
+_LEFT_THIGHS = ("bl_thigh", "fl_thigh")
+_RIGHT_THIGHS = ("br_thigh", "fr_thigh")
+_WAIST = "waist"
 # A half turn swaps which wheel is forward, so it is not the same zero.
 _KNEE_PERIOD_RAD = 2.0 * math.pi
 # Knee groups are (rear, front). Positive rear rotation and negative front
@@ -597,7 +597,7 @@ def _knee_ctrl_ids(robot) -> torch.Tensor:
   ids = [
     actuator.global_ctrl_ids
     for actuator in robot.actuators
-    if any("thigh_shin_joint" in name for name in actuator.target_names)
+    if any(name.endswith("_knee") for name in actuator.target_names)
   ]
   if not ids:
     raise KeyError("No knee position actuators found.")
@@ -612,7 +612,7 @@ def _write_knee_servo(env, ctrl_ids: torch.Tensor, kp: float, kd: float) -> None
   """
   robot = env.scene["robot"]
   for actuator in robot.actuators:
-    if not any("thigh_shin_joint" in name for name in actuator.target_names):
+    if not any(name.endswith("_knee") for name in actuator.target_names):
       continue
     if getattr(actuator, "stiffness", None) is not None:
       _write_python_knee_servo(actuator, kp, kd)
@@ -763,7 +763,7 @@ def _group(robot, columns: dict[str, int], names: tuple[str, ...], device) -> _J
 def _wheel_actuator(robot):
   """The DC motor group that drives the wheel joints."""
   for actuator in robot.actuators:
-    if any("wheel_joint" in name for name in actuator.target_names):
+    if any("_axle" in name for name in actuator.target_names):
       return actuator
   raise KeyError("No wheel actuators found.")
 
@@ -779,10 +779,11 @@ def _clip_wheel_action(speed: float, omega_max: float) -> float:
 
 def _wheel_columns(robot, columns: dict[str, int], side: str, device) -> torch.Tensor:
   """Action columns for the four wheels on ``side`` (``left`` or ``right``)."""
-  _ids, names = robot.find_joints(".*wheel_joint")
-  picked = [columns[name] for name in names if f"_{side}_" in name]
+  _ids, names = robot.find_joints(r".*_axle[12]")
+  prefixes = ("fl_", "bl_") if side == "left" else ("fr_", "br_")
+  picked = [columns[name] for name in names if name.startswith(prefixes)]
   if len(picked) != 4:
-    raise KeyError(f"Expected 4 {side} wheels, found {picked}")
+    raise KeyError(f"Expected 4 {side} wheels, found {names}")
   return torch.tensor(picked, dtype=torch.long, device=device)
 
 

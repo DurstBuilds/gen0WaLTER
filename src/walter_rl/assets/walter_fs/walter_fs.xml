@@ -1,97 +1,107 @@
-<mujoco model="MuJoCo Model">
-  <compiler angle="radian"/>
+<mujoco model="WaLTER FS">
+  <compiler angle="radian" meshdir="assets/meshes" texturedir="assets/textures"/>
+
+  <default>
+    <default class="visual">
+      <geom contype="0" conaffinity="0" group="2" density="0" rgba="0.694118 0.65098 0.533333 1"/>
+    </default>
+    <default class="collision">
+      <geom group="3" density="0" rgba="0.9 0.2 0.2 1"/>
+    </default>
+  </default>
+
+  <asset>
+    <texture type="2d" name="wheel_texture" file="wheel.png"/>
+    <material name="wheel" texture="wheel_texture" specular="0.12" shininess="0.35"/>
+    <mesh name="thigh_vis_mesh" file="visual/thigh_vis_mesh.obj" inertia="exact"/>
+    <mesh name="thigh_right_vis_mesh" file="visual/thigh_vis_mesh.obj" scale="1 -1 1" inertia="exact"/>
+    <mesh name="shin_vis_mesh" file="visual/shin_vis_mesh.obj" inertia="exact"/>
+    <mesh name="shin_right_vis_mesh" file="visual/shin_vis_mesh.obj" scale="1 -1 1" inertia="exact"/>
+    <mesh name="wheel_vis_mesh" file="visual/wheel_vis_mesh.obj" inertia="exact"/>
+    <mesh name="wheel_right_vis_mesh" file="visual/wheel_vis_mesh.obj" scale="1 -1 1" inertia="exact"/>
+  </asset>
 
   <worldbody>
+    <!-- +x is forward. Root is the long rear segment; the short box is the head. -->
     <body name="torso" pos="0 0 0.5">
-      <joint name="torso_joint" type="free"/>
-      <geom size="0.23 0.108 0.09" type="box" mass="36" rgba="0.694118 0.65098 0.533333 1"/>
-      <body name="torso_left_thigh" pos="-0.108 0.108 0">
-        <joint name="torso_left_thigh_joint" pos="0 0 0" axis="0 1 0" armature="5.12" damping="2"/>
-        <geom name="torso_left_thigh_geom" size="0.04 0.09" pos="0 0.04 -0.09" type="capsule" mass="3.375" rgba="0.694118 0.65098 0.533333 1"/>
-        <body name="torso_left_shin" pos="0 0.12 -0.18">
-          <joint name="torso_left_thigh_shin_joint" pos="0 0 0" axis="0 1 0" armature="2.88" damping="2"/>
-          <geom name="torso_left_shin_geom" size="0.04 0.108" quat="0.707107 0 0.707107 0" type="capsule" mass="1.2" rgba="0.694118 0.65098 0.533333 1"/>
-          <body name="torso_left_front_wheel" pos="0.108 0.09 0">
-            <joint name="torso_left_shin_front_wheel_joint" pos="0 0 0" axis="0 1 0" armature="0.18" damping="2"/>
-            <geom name="torso_left_front_wheel_geom" size="0.1 0.1 0.05" quat="0.707107 0.707107 0 0" type="ellipsoid" solref="-80800 -112" mass="2.25" rgba="0.694118 0.65098 0.533333 1"/>
+      <joint name="root" type="free"/>
+      <geom name="torso_vis" class="visual" type="box" size="0.23 0.15 0.09" rgba="0.658824 0.596078 0.505882 1" mass="25.91"/>
+      <body name="br_thigh" pos="-0.108 -0.15 0">
+        <joint name="br_hip" axis="0 1 0" armature="5.12" damping="2"/>
+        <geom name="br_thigh_vis" class="visual" type="mesh" mesh="thigh_right_vis_mesh" pos="0 -0.039448 0" quat="0 0 0.707107 -0.707107" rgba="0.658824 0.596078 0.505882 1" mass="5.25"/>
+        <body name="br_shin" pos="0 -0.057673 -0.180975">
+          <joint name="br_knee" axis="0 1 0" armature="2.88" damping="2"/>
+          <geom name="br_shin_vis" class="visual" type="mesh" mesh="shin_right_vis_mesh" rgba="0.658824 0.596078 0.505882 1" mass="5.76"/>
+          <body name="br_wheel1" pos="0.1137 -0.0471 0">
+            <joint name="br_axle1" axis="0 1 0" armature="0.18" damping="2"/>
+            <geom name="br_wheel1_col" class="collision" type="ellipsoid" size="0.11 0.11 0.05" pos="0 -0.04 0" quat="0.707107 -0.707107 0 0" solref="-80800 -112"/>
+            <geom name="br_wheel1_vis" class="visual" type="mesh" mesh="wheel_right_vis_mesh" quat="0.707107 0.707107 0 0" material="wheel" rgba="1 1 1 1" mass="1.59"/>
           </body>
-          <body name="torso_left_rear_wheel" pos="-0.108 0.09 0">
-            <joint name="torso_left_shin_rear_wheel_joint" pos="0 0 0" axis="0 1 0" armature="0.18" damping="2"/>
-            <geom name="torso_left_rear_wheel_geom" size="0.1 0.1 0.05" quat="0.707107 0.707107 0 0" type="ellipsoid" solref="-80800 -112" mass="2.25" rgba="0.694118 0.65098 0.533333 1"/>
+          <body name="br_wheel2" pos="-0.1137 -0.0471 0">
+            <joint name="br_axle2" axis="0 1 0" armature="0.18" damping="2"/>
+            <geom name="br_wheel2_col" class="collision" type="ellipsoid" size="0.11 0.11 0.05" pos="0 -0.04 0" quat="0.707107 -0.707107 0 0" solref="-80800 -112"/>
+            <geom name="br_wheel2_vis" class="visual" type="mesh" mesh="wheel_right_vis_mesh" quat="0.707107 0.707107 0 0" material="wheel" rgba="1 1 1 1" mass="1.59"/>
           </body>
         </body>
       </body>
-      <body name="torso_right_thigh" pos="-0.108 -0.108 0">
-        <joint name="torso_right_thigh_joint" pos="0 0 0" axis="0 1 0" armature="5.12" damping="2"/>
-        <geom name="torso_right_thigh_geom" size="0.04 0.09" pos="0 -0.04 -0.09" type="capsule" mass="3.375" rgba="0.694118 0.65098 0.533333 1"/>
-        <body name="torso_right_shin" pos="0 -0.12 -0.18">
-          <joint name="torso_right_thigh_shin_joint" pos="0 0 0" axis="0 1 0" armature="2.88" damping="2"/>
-          <geom name="torso_right_shin_geom" size="0.04 0.108" quat="0.707107 0 0.707107 0" type="capsule" mass="1.2" rgba="0.694118 0.65098 0.533333 1"/>
-          <body name="torso_right_front_wheel" pos="0.108 -0.09 0">
-            <joint name="torso_right_shin_front_wheel_joint" pos="0 0 0" axis="0 1 0" armature="0.18" damping="2"/>
-            <geom name="torso_right_front_wheel_geom" size="0.1 0.1 0.05" quat="0.707107 0.707107 0 0" type="ellipsoid" solref="-80800 -112" mass="2.25" rgba="0.694118 0.65098 0.533333 1"/>
+      <body name="bl_thigh" pos="-0.108 0.15 0">
+        <joint name="bl_hip" axis="0 1 0" armature="5.12" damping="2"/>
+        <geom name="bl_thigh_vis" class="visual" type="mesh" mesh="thigh_vis_mesh" pos="0 0.039448 0" quat="0 0 0.707107 0.707107" rgba="0.658824 0.596078 0.505882 1" mass="5.25"/>
+        <body name="bl_shin" pos="0 0.057673 -0.180975">
+          <joint name="bl_knee" axis="0 1 0" armature="2.88" damping="2"/>
+          <geom name="bl_shin_vis" class="visual" type="mesh" mesh="shin_vis_mesh" rgba="0.658824 0.596078 0.505882 1" mass="5.76"/>
+          <body name="bl_wheel1" pos="0.1137 0.0471 0">
+            <joint name="bl_axle1" axis="0 1 0" armature="0.18" damping="2"/>
+            <geom name="bl_wheel1_col" class="collision" type="ellipsoid" size="0.11 0.11 0.05" pos="0 0.04 0" quat="0.707107 0.707107 0 0" solref="-80800 -112"/>
+            <geom name="bl_wheel1_vis" class="visual" type="mesh" mesh="wheel_vis_mesh" quat="0.707107 -0.707107 0 0" material="wheel" rgba="1 1 1 1" mass="1.59"/>
           </body>
-          <body name="torso_right_rear_wheel" pos="-0.108 -0.09 0">
-            <joint name="torso_right_shin_rear_wheel_joint" pos="0 0 0" axis="0 1 0" armature="0.18" damping="2"/>
-            <geom name="torso_right_rear_wheel_geom" size="0.1 0.1 0.05" quat="0.707107 0.707107 0 0" type="ellipsoid" solref="-80800 -112" mass="2.25" rgba="0.694118 0.65098 0.533333 1"/>
+          <body name="bl_wheel2" pos="-0.1137 0.0471 0">
+            <joint name="bl_axle2" axis="0 1 0" armature="0.18" damping="2"/>
+            <geom name="bl_wheel2_col" class="collision" type="ellipsoid" size="0.11 0.11 0.05" pos="0 0.04 0" quat="0.707107 0.707107 0 0" solref="-80800 -112"/>
+            <geom name="bl_wheel2_vis" class="visual" type="mesh" mesh="wheel_vis_mesh" quat="0.707107 -0.707107 0 0" material="wheel" rgba="1 1 1 1" mass="1.59"/>
           </body>
         </body>
       </body>
       <body name="head" pos="0.4054 0 0">
-        <joint name="head_joint" pos="-0.15 0 0" axis="1 0 0" stiffness="10" range="-0.436332 0.436332" damping="1"/>
-        <geom size="0.15 0.108 0.09" type="box" mass="18" rgba="0.694118 0.65098 0.533333 1"/>
-        <body name="head_left_thigh" pos="0.027 0.108 0">
-          <joint name="head_left_thigh_joint" pos="0 0 0" axis="0 1 0" armature="5.12" damping="2"/>
-          <geom name="head_left_thigh_geom" size="0.04 0.09" pos="0 0.04 -0.09" type="capsule" mass="3.375" rgba="0.694118 0.65098 0.533333 1"/>
-          <body name="head_left_shin" pos="0 0.12 -0.18">
-            <joint name="head_left_thigh_shin_joint" pos="0 0 0" axis="0 1 0" armature="2.88" damping="2"/>
-            <geom name="head_left_shin_geom" size="0.04 0.108" quat="0.707107 0 0.707107 0" type="capsule" mass="1.2" rgba="0.694118 0.65098 0.533333 1"/>
-            <body name="head_left_front_wheel" pos="0.108 0.09 0">
-              <joint name="head_left_shin_front_wheel_joint" pos="0 0 0" axis="0 1 0" armature="0.18" damping="2"/>
-              <geom name="head_left_front_wheel_geom" size="0.1 0.1 0.05" quat="0.707107 0.707107 0 0" type="ellipsoid" solref="-80800 -112" mass="2.25" rgba="0.694118 0.65098 0.533333 1"/>
+        <joint name="waist" pos="-0.15 0 0" axis="1 0 0" range="-0.436332 0.436332" stiffness="10" damping="1"/>
+        <geom name="head_vis" class="visual" type="box" size="0.15 0.15 0.09" rgba="0.658824 0.596078 0.505882 1" mass="18.79"/>
+        <body name="fr_thigh" pos="0.027 -0.15 0">
+          <joint name="fr_hip" axis="0 1 0" armature="5.12" damping="2"/>
+          <geom name="fr_thigh_vis" class="visual" type="mesh" mesh="thigh_right_vis_mesh" pos="0 -0.039448 0" quat="0 0 0.707107 -0.707107" rgba="0.658824 0.596078 0.505882 1" mass="5.25"/>
+          <body name="fr_shin" pos="0 -0.057673 -0.180975">
+            <joint name="fr_knee" axis="0 1 0" armature="2.88" damping="2"/>
+            <geom name="fr_shin_vis" class="visual" type="mesh" mesh="shin_right_vis_mesh" rgba="0.658824 0.596078 0.505882 1" mass="5.76"/>
+            <body name="fr_wheel1" pos="0.1137 -0.0471 0">
+              <joint name="fr_axle1" axis="0 1 0" armature="0.18" damping="2"/>
+              <geom name="fr_wheel1_col" class="collision" type="ellipsoid" size="0.11 0.11 0.05" pos="0 -0.04 0" quat="0.707107 -0.707107 0 0" solref="-80800 -112"/>
+              <geom name="fr_wheel1_vis" class="visual" type="mesh" mesh="wheel_right_vis_mesh" quat="0.707107 0.707107 0 0" material="wheel" rgba="1 1 1 1" mass="1.59"/>
             </body>
-            <body name="head_left_rear_wheel" pos="-0.108 0.09 0">
-              <joint name="head_left_shin_rear_wheel_joint" pos="0 0 0" axis="0 1 0" armature="0.18" damping="2"/>
-              <geom name="head_left_rear_wheel_geom" size="0.1 0.1 0.05" quat="0.707107 0.707107 0 0" type="ellipsoid" solref="-80800 -112" mass="2.25" rgba="0.694118 0.65098 0.533333 1"/>
+            <body name="fr_wheel2" pos="-0.1137 -0.0471 0">
+              <joint name="fr_axle2" axis="0 1 0" armature="0.18" damping="2"/>
+              <geom name="fr_wheel2_col" class="collision" type="ellipsoid" size="0.11 0.11 0.05" pos="0 -0.04 0" quat="0.707107 -0.707107 0 0" solref="-80800 -112"/>
+              <geom name="fr_wheel2_vis" class="visual" type="mesh" mesh="wheel_right_vis_mesh" quat="0.707107 0.707107 0 0" material="wheel" rgba="1 1 1 1" mass="1.59"/>
             </body>
           </body>
         </body>
-        <body name="head_right_thigh" pos="0.027 -0.108 0">
-          <joint name="head_right_thigh_joint" pos="0 0 0" axis="0 1 0" armature="5.12" damping="2"/>
-          <geom name="head_right_thigh_geom" size="0.04 0.09" pos="0 -0.04 -0.09" type="capsule" mass="3.375" rgba="0.694118 0.65098 0.533333 1"/>
-          <body name="head_right_shin" pos="0 -0.12 -0.18">
-            <joint name="head_right_thigh_shin_joint" pos="0 0 0" axis="0 1 0" armature="2.88" damping="2"/>
-            <geom name="head_right_shin_geom" size="0.04 0.108" quat="0.707107 0 0.707107 0" type="capsule" mass="1.2" rgba="0.694118 0.65098 0.533333 1"/>
-            <body name="head_right_front_wheel" pos="0.108 -0.09 0">
-              <joint name="head_right_shin_front_wheel_joint" pos="0 0 0" axis="0 1 0" armature="0.18" damping="2"/>
-              <geom name="head_right_front_wheel_geom" size="0.1 0.1 0.05" quat="0.707107 0.707107 0 0" type="ellipsoid" solref="-80800 -112" mass="2.25" rgba="0.694118 0.65098 0.533333 1"/>
+        <body name="fl_thigh" pos="0.027 0.15 0">
+          <joint name="fl_hip" axis="0 1 0" armature="5.12" damping="2"/>
+          <geom name="fl_thigh_vis" class="visual" type="mesh" mesh="thigh_vis_mesh" pos="0 0.039448 0" quat="0 0 0.707107 0.707107" rgba="0.658824 0.596078 0.505882 1" mass="5.25"/>
+          <body name="fl_shin" pos="0 0.057673 -0.180975">
+            <joint name="fl_knee" axis="0 1 0" armature="2.88" damping="2"/>
+            <geom name="fl_shin_vis" class="visual" type="mesh" mesh="shin_vis_mesh" rgba="0.658824 0.596078 0.505882 1" mass="5.76"/>
+            <body name="fl_wheel1" pos="0.1137 0.0471 0">
+              <joint name="fl_axle1" axis="0 1 0" armature="0.18" damping="2"/>
+              <geom name="fl_wheel1_col" class="collision" type="ellipsoid" size="0.11 0.11 0.05" pos="0 0.04 0" quat="0.707107 0.707107 0 0" solref="-80800 -112"/>
+              <geom name="fl_wheel1_vis" class="visual" type="mesh" mesh="wheel_vis_mesh" quat="0.707107 -0.707107 0 0" material="wheel" rgba="1 1 1 1" mass="1.59"/>
             </body>
-            <body name="head_right_rear_wheel" pos="-0.108 -0.09 0">
-              <joint name="head_right_shin_rear_wheel_joint" pos="0 0 0" axis="0 1 0" armature="0.18" damping="2"/>
-              <geom name="head_right_rear_wheel_geom" size="0.1 0.1 0.05" quat="0.707107 0.707107 0 0" type="ellipsoid" solref="-80800 -112" mass="2.25" rgba="0.694118 0.65098 0.533333 1"/>
+            <body name="fl_wheel2" pos="-0.1137 0.0471 0">
+              <joint name="fl_axle2" axis="0 1 0" armature="0.18" damping="2"/>
+              <geom name="fl_wheel2_col" class="collision" type="ellipsoid" size="0.11 0.11 0.05" pos="0 0.04 0" quat="0.707107 0.707107 0 0" solref="-80800 -112"/>
+              <geom name="fl_wheel2_vis" class="visual" type="mesh" mesh="wheel_vis_mesh" quat="0.707107 -0.707107 0 0" material="wheel" rgba="1 1 1 1" mass="1.59"/>
             </body>
           </body>
         </body>
       </body>
     </body>
   </worldbody>
-
-  <actuator>
-    <general name="bl_hip" joint="torso_left_thigh_joint"/>
-    <general name="bl_knee" joint="torso_left_thigh_shin_joint"/>
-    <general name="bl_wheel1_joint" joint="torso_left_shin_front_wheel_joint"/>
-    <general name="bl_wheel2_joint" joint="torso_left_shin_rear_wheel_joint"/>
-    <general name="br_hip" joint="torso_right_thigh_joint"/>
-    <general name="br_knee" joint="torso_right_thigh_shin_joint"/>
-    <general name="br_wheel1_joint" joint="torso_right_shin_front_wheel_joint"/>
-    <general name="br_wheel2_joint" joint="torso_right_shin_rear_wheel_joint"/>
-    <general name="fl_hip" joint="head_left_thigh_joint"/>
-    <general name="fl_knee" joint="head_left_thigh_shin_joint"/>
-    <general name="fl_wheel1_joint" joint="head_left_shin_front_wheel_joint"/>
-    <general name="fl_wheel2_joint" joint="head_left_shin_rear_wheel_joint"/>
-    <general name="fr_hip" joint="head_right_thigh_joint"/>
-    <general name="fr_knee" joint="head_right_thigh_shin_joint"/>
-    <general name="fr_wheel1_joint" joint="head_right_shin_front_wheel_joint"/>
-    <general name="fr_wheel2_joint" joint="head_right_shin_rear_wheel_joint"/>
-  </actuator>
 </mujoco>

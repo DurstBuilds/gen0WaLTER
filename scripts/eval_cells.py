@@ -5,15 +5,15 @@ Examples:
   python scripts/eval_cells.py --controller checkpoint --cell pyramid-stairs \\
     --difficulty hard --checkpoint logs/rsl_rl/.../model_600.pt
   python scripts/eval_cells.py --controller checkpoint --cell pyramid-stairs \\
-    --difficulty hard --checkpoint research/logs/training/.../model_500.pt \\
+    --difficulty hard --checkpoint logs/rsl_rl/.../model_500.pt \\
     --ablate-scan
 
 The clip is one environment on one sub-terrain. ``medium`` is difficulty 2/3,
 the third of the four rough-test rows (0, 1/3, 2/3, 1). ``hard`` is the last
 row. PD playback sets ``TeacherStudentEnv.follow_teacher``, so ``step`` applies
-the full-body PD action. ``--ablate-scan`` replaces the actor and critic
-``height_scan`` term with zeros before the policy reads it. The csv still
-records the real forward-scan clearance.
+the full-body PD action. ``--ablate-scan`` replaces the actor and critic front and rear height-scan
+terms with zeros before the policy reads them. The csv still records the
+real forward-scan clearance.
 """
 
 from __future__ import annotations
@@ -34,13 +34,13 @@ from mjlab.tasks.velocity.mdp import UniformVelocityCommandCfg
 from mjlab.viewer.viewer_config import ViewerConfig
 
 from walter_rl.rl.checkpoint_policy import CheckpointPolicy
-from walter_rl.rl.ppo import walter_ppo_runner_cfg
-from walter_rl.rl.teacher_env import TeacherStudentEnv
-from walter_rl.rl.vecenv import RslRlVecEnvWrapper
+from walter_rl.rl.ppo import teacher_ppo_runner_cfg
+from walter_rl.rl.teacher_env import POLICY_ACTION_DIM, TeacherStudentEnv
+from walter_rl.rl.vecenv import TeacherStudentVecEnv
 from walter_rl.tasks.velocity.config.walter_fs.env_cfgs import (
-  _TERRAIN_SCAN_OFFSET,
-  _TERRAIN_SCAN_RESOLUTION,
-  _TERRAIN_SCAN_SIZE,
+  _FRONT_SCAN_OFFSET_X,
+  _SPLIT_SCAN_RESOLUTION,
+  _SPLIT_SCAN_SIZE,
   walter_fs_teacher_env_cfg,
 )
 from walter_rl.tasks.velocity.mdp.observations import finite_height_scan
@@ -182,12 +182,14 @@ def _track_torso(cfg: ManagerBasedRlEnvCfg) -> None:
 
 
 def _ablate_height_scan(cfg: ManagerBasedRlEnvCfg) -> None:
-  """Zero ``height_scan`` in every group the networks read."""
+  """Zero the split height scans in every group the networks read."""
   for group_name in ("actor", "critic"):
-    term = cfg.observations[group_name].terms.get("height_scan")
-    if term is None:
-      raise SystemExit(f"{group_name} has no height_scan term to ablate.")
-    term.func = _zeroed_height_scan
+    terms = cfg.observations[group_name].terms
+    for term_name in ("height_scan_front", "height_scan_rear"):
+      term = terms.get(term_name)
+      if term is None:
+        raise SystemExit(f"{group_name} has no {term_name} term to ablate.")
+      term.func = _zeroed_height_scan
 
 
 def _zeroed_height_scan(env: TeacherStudentEnv, sensor_name: str) -> torch.Tensor:
@@ -216,11 +218,11 @@ def _load_policy(
   device: str,
 ) -> CheckpointPolicy:
   """Load an actor the same way ``scripts/play.py`` loads one."""
-  agent_cfg = walter_ppo_runner_cfg(
+  agent_cfg = teacher_ppo_runner_cfg(
     max_iterations=1,
     experiment_name="walter_fs_eval",
   )
-  wrapped = RslRlVecEnvWrapper(env, clip_actions=agent_cfg["clip_actions"])
+  wrapped = TeacherStudentVecEnv(env, clip_actions=agent_cfg["clip_actions"])
   runner = OnPolicyRunner(wrapped, agent_cfg, log_dir=None, device=device)
   runner.load(str(checkpoint))
   model = runner.get_inference_policy(device=device)
@@ -344,8 +346,23 @@ def _put_action(
 ) -> None:
   """Write one column per action target for environment 0."""
   values = action[0].detach().cpu().tolist()
-  for name, value in zip(names, values, strict=True):
+  labels = _column_names(names, len(values))
+  for name, value in zip(labels, values, strict=True):
     row[f"{prefix}_{name}"] = float(value)
+
+
+def _column_names(plant_names: list[str], width: int) -> list[str]:
+  """Plant joint names, or the 17-D policy order when that vector is logged."""
+  if width == len(plant_names):
+    return plant_names
+  if width != POLICY_ACTION_DIM:
+    raise SystemExit(
+      f"Action width {width} matches neither the plant nor the policy."
+    )
+  hips = plant_names[0:4]
+  knees = plant_names[4:8]
+  wheels = plant_names[8:16]
+  return [*hips, *wheels, "drive_state", *knees]
 
 
 def _along_spawn_speed(env: TeacherStudentEnv, robot) -> float:
@@ -370,7 +387,7 @@ def _yaw_from_spawn(env: TeacherStudentEnv, robot) -> float:
 
 def _forward_scan_height(env: TeacherStudentEnv, mask: torch.Tensor) -> float:
   """Mean real scan clearance ahead of the torso, independent of ablation."""
-  heights = finite_height_scan(env, sensor_name="terrain_scan")[0]
+  heights = finite_height_scan(env, sensor_name="terrain_scan_front")[0]
   if heights.numel() != mask.numel():
     raise SystemExit(
       f"Height scan has {heights.numel()} rays; forward mask has {mask.numel()}."
@@ -379,19 +396,18 @@ def _forward_scan_height(env: TeacherStudentEnv, mask: torch.Tensor) -> float:
 
 
 def _forward_ray_mask(device: torch.device | str) -> torch.Tensor:
-  """True for scan rays whose body-frame x is in front of the torso."""
-  size_x, size_y = _TERRAIN_SCAN_SIZE
-  res = _TERRAIN_SCAN_RESOLUTION
-  offset_x, _offset_y = _TERRAIN_SCAN_OFFSET
+  """True for front-scan rays whose body-frame x is ahead of the head origin."""
+  size_x, size_y = _SPLIT_SCAN_SIZE
+  res = _SPLIT_SCAN_RESOLUTION
   x = torch.arange(-size_x / 2, size_x / 2 + res * 0.5, res, device=device)
   y = torch.arange(-size_y / 2, size_y / 2 + res * 0.5, res, device=device)
-  grid_x, _grid_y = torch.meshgrid(x + offset_x, y, indexing="xy")
+  grid_x, _grid_y = torch.meshgrid(x + _FRONT_SCAN_OFFSET_X, y, indexing="xy")
   return grid_x.reshape(-1) > 0.0
 
 
 def _knee_ids(env: TeacherStudentEnv) -> torch.Tensor:
   """Joint indices for every thigh-shin knee."""
-  ids, _names = env.scene["robot"].find_joints(r".*_thigh_shin_joint")
+  ids, _names = env.scene["robot"].find_joints(r".*_knee")
   if not ids:
     raise SystemExit("No knee joints found.")
   return torch.tensor(ids, device=env.device, dtype=torch.long)
@@ -412,13 +428,14 @@ def _action_names(env: TeacherStudentEnv) -> list[str]:
 
 
 def _assert_actor_scan_zero(env: TeacherStudentEnv, obs: dict) -> None:
-  """Fail if the actor still receives a non-zero height scan."""
+  """Fail if the actor still receives a non-zero split height scan."""
   actor = obs["actor"]
   if not isinstance(actor, torch.Tensor):
     raise SystemExit("Actor observations are not concatenated.")
-  scan = actor[:, _term_slice(env, "height_scan")]
-  if float(scan.abs().max()) != 0.0:
-    raise SystemExit("Scan ablation left a non-zero actor height_scan.")
+  for term_name in ("height_scan_front", "height_scan_rear"):
+    scan = actor[:, _term_slice(env, term_name)]
+    if float(scan.abs().max()) != 0.0:
+      raise SystemExit(f"Scan ablation left a non-zero actor {term_name}.")
 
 
 def _term_slice(env: TeacherStudentEnv, term_name: str) -> slice:
@@ -433,7 +450,7 @@ def _term_slice(env: TeacherStudentEnv, term_name: str) -> slice:
     if name == term_name:
       return slice(start, start + width)
     start += width
-  raise SystemExit("Actor observation has no height_scan term.")
+  raise SystemExit(f"Actor observation has no {term_name} term.")
 
 
 def _copy_frame(frame: np.ndarray | None) -> np.ndarray:
@@ -487,14 +504,14 @@ def _step_count(args: argparse.Namespace, step_dt: float) -> int:
 
 
 def _output_dir(args: argparse.Namespace) -> Path:
-  """Default to ``research/logs/analysis/<run_id>/``."""
+  """Default to ``logs/rsl_rl/analysis/<run_id>/``."""
   if args.output is not None:
     return Path(args.output)
   stamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
   name = f"{stamp}_{args.controller}_{args.cell}_{args.difficulty}"
   if args.ablate_scan:
     name += "_ablate-scan"
-  return Path("research/logs/analysis") / name
+  return Path("logs/rsl_rl/analysis") / name
 
 
 def _resolve_device(requested: str | None) -> str:

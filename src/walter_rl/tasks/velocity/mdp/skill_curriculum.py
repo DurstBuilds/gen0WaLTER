@@ -17,13 +17,13 @@ from mjlab.managers.manager_base import ManagerTermBase
 from mjlab.utils.lab_api.math import quat_from_euler_xyz
 
 from walter_rl.assets.walter_fs.walter_constants import NOMINAL_ROOT_HEIGHT
-from walter_rl.tasks.velocity.mdp.rewards import column_height_step, forward_height_step
+from walter_rl.tasks.velocity.mdp.rewards import forward_match_step
 
 if TYPE_CHECKING:
   from mjlab.envs import ManagerBasedRlEnv
   from mjlab.managers.curriculum_manager import CurriculumTermCfg
 
-_KNEE_PATTERN = r".*_thigh_shin_joint"
+_KNEE_PATTERN = r".*_knee"
 _STAIRS = "pyramid_stairs"
 _STAIRS_INV = "pyramid_stairs_inv"
 _CUBES = "random_grid"
@@ -34,7 +34,9 @@ _CLIMB_NAMES = (_STAIRS, _STAIRS_INV, _CUBES)
 _TILE_HALF_M = 4.0
 _STAIR_RISER_R_M = 3.0
 _PIT_WALL_R_M = 1.5
-_TORSO_HALF_X_M = 0.23
+# Root origin to the front face. The back torso is the root; the long
+# segment hangs forward of the waist.
+_TORSO_HALF_X_M = 0.5554
 _APPROACH_M = 0.75
 _YAW_NOISE_RAD = 0.15
 _LATERAL_NOISE_M = 0.15
@@ -96,6 +98,10 @@ class SkillTerrainCurriculum(ManagerTermBase):
     self.last_height = torch.zeros(n, device=env.device)
     self.last_travel = torch.zeros(n, device=env.device)
     self.last_wasted = torch.zeros(n, dtype=torch.bool, device=env.device)
+    terrain = env.scene.terrain
+    assert terrain is not None
+    # The column assigned at startup. Climb graduates return here.
+    self._home_column = terrain.terrain_types.clone()
 
   def accumulate(self, dt: float) -> None:
     """Update drive distance and climb flags from this step."""
@@ -145,7 +151,7 @@ class SkillTerrainCurriculum(ManagerTermBase):
       self.last_height[env_ids] = self.height_gain[env_ids]
       self.last_travel[env_ids] = self.drive_travel[env_ids]
       self.last_wasted[env_ids] = self.wasted_tumble[env_ids]
-      _apply_verdict(env, env_ids, verdict)
+      _apply_verdict(self, env, env_ids, verdict)
     stats = _stats(env)
     stats["drive_travel"] = torch.mean(self.drive_travel[env_ids])
     return stats
@@ -181,25 +187,8 @@ class SkillTerrainCurriculum(ManagerTermBase):
 
 
 def _forward_step(env) -> torch.Tensor:
-  """Largest height jump ahead of the robot.
-
-  The teacher scene has one torso grid named ``terrain_scan``. The state
-  machine replaces it with a head-mounted front grid, so the bins follow
-  that grid's own spacing.
-  """
-  if "terrain_scan" in env.scene.sensors:
-    return forward_height_step(env)
-  sensor = env.scene["terrain_scan_front"]
-  pattern = sensor.cfg.pattern
-  half = pattern.size[0] / 2.0
-  center = pattern.offset[0]
-  return column_height_step(
-    env,
-    sensor.cfg.name,
-    pattern.resolution,
-    center - half,
-    center + half,
-  )
+  """Largest height jump ahead of the robot."""
+  return forward_match_step(env)
 
 
 def accumulate_skill_progress(
@@ -299,8 +288,13 @@ def _verdict(term: SkillTerrainCurriculum, env_ids: torch.Tensor) -> torch.Tenso
   return torch.where(demote, _DEMOTE, code)
 
 
-def _apply_verdict(env, env_ids: torch.Tensor, verdict: torch.Tensor) -> None:
-  """Move rows. A new climb slot on a drive-only column changes the column."""
+def _apply_verdict(
+  term: SkillTerrainCurriculum,
+  env,
+  env_ids: torch.Tensor,
+  verdict: torch.Tensor,
+) -> None:
+  """Move rows. A finished or demoted climb returns to its home column."""
   terrain = env.scene.terrain
   assert terrain is not None and terrain.terrain_origins is not None
   levels = terrain.terrain_levels
@@ -309,7 +303,7 @@ def _apply_verdict(env, env_ids: torch.Tensor, verdict: torch.Tensor) -> None:
   col = types[env_ids].clone()
   climb = _is_climb(env)[env_ids]
   row, col = _next_drive(terrain, row, col, verdict, ~climb)
-  row, col = _next_climb(row, col, verdict, climb)
+  row, col = _next_climb(row, col, verdict, climb, term._home_column[env_ids])
   levels[env_ids] = row
   types[env_ids] = col
   terrain.env_origins[env_ids] = terrain.terrain_origins[row, col]
@@ -328,15 +322,17 @@ def _next_drive(terrain, row, col, verdict, drive):
   return row, torch.where(needs_column, _climb_column(terrain, col), col)
 
 
-def _next_climb(row, col, verdict, climb):
-  """Step up climb rows. The top success, or a cruise away, returns to row 0."""
+def _next_climb(row, col, verdict, climb, home):
+  """Step up climb rows. Finishing or failing returns to the home column."""
   promote = climb & (verdict == _PROMOTE)
   demote = climb & (verdict == _DEMOTE)
   # Climb rows are 2 and 3. Clearing 3 returns to the drive pool.
   finished = promote & (row >= _CLIMB_ROW + 1)
   step = promote & ~finished
+  returning = finished | demote
   row = torch.where(step, row + 1, row)
-  row = torch.where(finished | demote, torch.zeros_like(row), row)
+  row = torch.where(returning, torch.zeros_like(row), row)
+  col = torch.where(returning, home, col)
   return row, col
 
 

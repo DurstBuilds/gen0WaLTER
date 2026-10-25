@@ -81,7 +81,7 @@ class VelocityGains:
   """
 
   kp: float = 15.0
-  wheel_radius: float = 0.10
+  wheel_radius: float = 0.11
   wheel_speed_limit: float = 50.0
   full_speed_command: float = 10.0
 
@@ -103,7 +103,7 @@ class YawRateGains:
   """
 
   kp: float = 5.0
-  track_half_width: float = 0.32
+  track_half_width: float = 0.295
   yaw_rate_limit: float = 2.5
   sign: float = 1.0
 
@@ -140,7 +140,7 @@ class TumbleGains:
 
 @dataclass
 class WaistGains:
-  """Hold ``head_joint`` at zero.
+  """Hold ``waist`` at zero.
 
   These are the MuJoCo position-actuator gains, in N·m/rad and N·m·s/rad.
   ``effort_limit`` is the torque cap, in N·m. They are read when the

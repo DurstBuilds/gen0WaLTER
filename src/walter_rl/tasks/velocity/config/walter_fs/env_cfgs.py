@@ -60,6 +60,10 @@ from walter_rl.tasks.velocity.mdp import (
   head_level,
   hold_spawn_heading,
   joint_pos_sincos,
+  last_policy_action,
+  teacher_policy_action,
+  terrain_level,
+  tumble_latch_timers,
   knee_tumble,
   knee_tumble_reverse,
   knee_waste,
@@ -67,12 +71,22 @@ from walter_rl.tasks.velocity.mdp import (
   non_finite_root,
   tumble_applied,
   policy_action_rate_l2,
+  climb_tumble,
+  footprint_downhill_tumble,
+  footprint_height_profile,
+  footprint_scan_pattern,
+  forward_progress,
   predictive_knee_tumble,
+  torso_contact_flag,
+  unneeded_tumble,
   spawn_heading_error,
   teacher_action_mse,
   SkillTerrainCurriculum,
   accumulate_skill_progress,
   spawn_skill_pose,
+  TraversalTerrainCurriculum,
+  accumulate_traversal_progress,
+  spawn_traversal_pose,
   terrain_levels_along_spawn,
   terrain_levels_hold_max,
   track_lin_vel_xy,
@@ -82,8 +96,13 @@ from walter_rl.tasks.velocity.mdp import (
   wheel_wheel_collision,
 )
 
-_HIP_WAIST_JOINTS = (r".*_thigh_joint", "head_joint")
-_KNEE_JOINTS = (r".*_thigh_shin_joint",)
+# Physics is 200 Hz (5 ms). 20 substeps is a 10 Hz policy step.
+_POLICY_DECIMATION = 20
+# Rough training has eight sub-terrain columns. The critic one-hot is padded to
+# this width so checkpoints load on rough-test (seven columns) or flat play.
+_STATE_MACHINE_TERRAIN_COLUMN_SLOTS = 8
+_HIP_WAIST_JOINTS = (r".*_hip", "waist")
+_KNEE_JOINTS = (r".*_knee",)
 _LEGGED_REWARD_TERMS = (
   "pose",
   "body_ang_vel",
@@ -96,14 +115,14 @@ _LEGGED_REWARD_TERMS = (
   "soft_landing",
 )
 _WHEEL_GEOMS = (
-  "torso_left_front_wheel_geom",
-  "torso_left_rear_wheel_geom",
-  "torso_right_front_wheel_geom",
-  "torso_right_rear_wheel_geom",
-  "head_left_front_wheel_geom",
-  "head_left_rear_wheel_geom",
-  "head_right_front_wheel_geom",
-  "head_right_rear_wheel_geom",
+  "fr_wheel1_col",
+  "fr_wheel2_col",
+  "fl_wheel1_col",
+  "fl_wheel2_col",
+  "br_wheel1_col",
+  "br_wheel2_col",
+  "bl_wheel1_col",
+  "bl_wheel2_col",
 )
 _CRITIC_FOOT_TERMS = (
   "foot_height",
@@ -203,14 +222,29 @@ FORWARD_TRACK_WEIGHT = 2.0  # Drive at the commanded speed along body x.
 HEADING_HOLD_WEIGHT = 0.0  # Stay pointed the way it spawned, except while tumbling.
 YAW_TRACK_WEIGHT = 1.0  # Match the commanded turn rate.
 UPRIGHT_WEIGHT = 0.1  # Keep the torso upright.
-ACTION_RATE_WEIGHT = -0.1  # Penalize flipping the tumble toggle.
+ACTION_RATE_WEIGHT = -0.5  # Penalize changes in the tumble toggle and tank hip.
 HEAD_LEVEL_WEIGHT = 0.0  # Penalize the head rolling off level.
 WHEEL_COLLISION_WEIGHT = 0.0  # Penalize wheels touching each other.
-LIMB_TORQUE_PENALTY_WEIGHT = -0.01  # Penalize hip and knee torque relative to rated torque.
+LIMB_TORQUE_PENALTY_WEIGHT = -0.005  # Penalize hip and knee torque relative to rated torque.
 KNEE_STUCK_TUMBLE_WEIGHT = 0.0  # Pay for knee spin while falling behind the speed command.
 TRACK_TEACHER_WEIGHT = 0.0  # Match the PD teacher's joint command.
-PREDICTIVE_KNEE_TUMBLE_WEIGHT = 2.0  # Pay for knee spin when a step is still ahead.
+PREDICTIVE_KNEE_TUMBLE_WEIGHT = 2.0  # Pay for knee spin when an upward step is still ahead.
+# Per radian of nose-down pitch while tumbling toward a drop. A 12 cm stair
+# is about 22 deg, so this is about -2.3/s and outweighs the tumble bonus.
+DOWNHILL_TUMBLE_WEIGHT = -6.0
 STUCK_SPEED_WEIGHT = -1.0  # Penalize body-x speed near zero while commanded forward.
+
+# State-machine table at a 10 Hz policy step. The constants above stay on the
+# teacher and the 50 Hz tasks. Action rate is smaller because the step is 5x longer.
+SM_FORWARD_TRACK_WEIGHT = 1.0
+SM_FORWARD_PROGRESS_WEIGHT = 2.0
+SM_CLIMB_TUMBLE_WEIGHT = 1.5
+SM_UNNEEDED_TUMBLE_WEIGHT = -1.0
+SM_STUCK_SPEED_WEIGHT = -0.5
+SM_ACTION_RATE_WEIGHT = -0.1
+SM_TORSO_CONTACT_WEIGHT = -2.0
+_ROBOT_MASS_KG = 101.46
+_HARD_TORSO_CONTACT_N = 0.3 * _ROBOT_MASS_KG * 9.81
 
 # Kernel widths for the terms above. These are not weights.
 HEADING_HOLD_STD = 0.5
@@ -233,7 +267,7 @@ def walter_fs_rl_env_cfg(
   the yaw range.
 
   Hips, absolute knees, and wheels match ``FullBodyPdController``.
-  ``head_joint`` is fixed at 0 degrees and is not an action.
+  ``waist`` is fixed at 0 degrees and is not an action.
   Actor and critic both include the torso terrain-height scan. Flat ground
   keeps that sensor too, so the observation width matches the rough scenes.
   """
@@ -257,6 +291,21 @@ def walter_fs_rl_env_cfg(
     _track_spawn_heading(cfg)
     _pin_hard_inverted_stairs(cfg)
   return cfg
+
+
+def _configure_traversal_curriculum(cfg: ManagerBasedRlEnvCfg) -> None:
+  """Replace the frozen heading curriculum with fixed-column traversal."""
+  cfg.curriculum["terrain_levels"] = CurriculumTermCfg(
+    func=TraversalTerrainCurriculum,
+  )
+  cfg.events["traversal_progress"] = EventTermCfg(
+    func=accumulate_traversal_progress,
+    mode="step",
+  )
+  cfg.events["traversal_spawn"] = EventTermCfg(
+    func=spawn_traversal_pose,
+    mode="reset",
+  )
 
 
 def _configure_rough_test_curriculum(cfg: ManagerBasedRlEnvCfg) -> None:
@@ -297,17 +346,25 @@ def walter_fs_teacher_env_cfg(
 ) -> ManagerBasedRlEnvCfg:
   """Velocity task on ``task`` terrain, matching a scan-conditioned PD target.
 
+  Observations and the policy MLP match the state-machine stack: front and
+  rear height grids, the same proprioception, and the tumble bit over
+  0.5 s. The student outputs a 17-D action: hips, wheels, drive_state, and
+  knee positions. The env decodes that into the 16-D plant command.
+
   On a flat scan the stored teacher action is the reactive PD. When the
   match gate is off, that action is the same PD command with tumble forced
   on. ``track_teacher`` matches it at ``TRACK_TEACHER_WEIGHT`` either way.
-  ``predictive_knee_tumble`` still pays for knee rate when a step is ahead.
+  ``predictive_knee_tumble`` still pays for knee rate when an upward step is ahead.
   ``knee_stuck_tumble`` remains the lag recovery signal.
   """
   cfg = walter_fs_rl_env_cfg(play=play, task=task)
+  _install_split_scans(cfg)
+  _install_footprint_scan(cfg)
+  _configure_teacher_observations(cfg)
   cfg.rewards["track_teacher"] = RewardTermCfg(
     func=gated_track_teacher_action,
     weight=TRACK_TEACHER_WEIGHT,
-    params={"std": TRACK_TEACHER_STD, "sensor_name": "terrain_scan"},
+    params={"std": TRACK_TEACHER_STD, "sensor_name": "terrain_scan_front"},
   )
   cfg.rewards["predictive_knee_tumble"] = RewardTermCfg(
     func=predictive_knee_tumble,
@@ -315,10 +372,6 @@ def walter_fs_teacher_env_cfg(
     params={
       "command_name": "twist",
       "asset_cfg": SceneEntityCfg("robot", joint_names=_KNEE_JOINTS),
-      "sensor_name": "terrain_scan",
-      "spacing": _TERRAIN_SCAN_RESOLUTION,
-      "x_min": 0.1,
-      "x_max": 1.6,
     },
   )
   cfg.metrics["teacher_action_mse"] = MetricsTermCfg(func=teacher_action_mse)
@@ -333,49 +386,86 @@ def walter_fs_state_machine_env_cfg(
   play: bool = False,
   task: RlSceneName = "flat",
 ) -> ManagerBasedRlEnvCfg:
-  """PD inner loop with a learned tumble-versus-wheel toggle.
+  """PD inner loop with a learned tumble toggle and tank hip offset.
 
   Actor and critic see the head and torso height grids, projected gravity,
   rated motor torques, the twist command, and the applied tumble mode over
-  the last 0.5 s. The policy action is a scalar; PD still writes the 16
-  joint targets. The stall-integral tumble gate is not used.
+  the last 0.5 s. The policy action is two numbers: the tumble toggle and
+  a hip offset from 0 to 30 degrees. Tank Mode stays on and the tank knee
+  command stays at zero. PD still writes the 16 joint targets. The
+  stall-integral tumble gate is not used.
   """
   cfg = walter_fs_rl_env_cfg(play=play, task=task)
+  # Set before observations so tumble memory counts policy steps, not PD ticks.
+  cfg.decimation = _POLICY_DECIMATION
+  if task == "rough":
+    # After the shared rough scene. rough-test scales that scene by 1.5.
+    _configure_rough_training_terrain(cfg)
+    if not play:
+      _configure_traversal_curriculum(cfg)
+  _configure_state_machine_contact(cfg)
+  _install_footprint_scan(cfg)
   _configure_state_machine_observations(cfg)
   _configure_state_machine_rewards(cfg)
   return cfg
 
 
-def _configure_state_machine_observations(cfg: ManagerBasedRlEnvCfg) -> None:
-  """Front and rear height grids, gravity, torques, command, and tumble memory.
+_AXLE_JOINTS = (r".*_axle\d",)
+_HIP_JOINTS = (r".*_hip",)
 
-  The front grid is attached to the head and the rear grid to the torso.
+
+def _configure_teacher_observations(cfg: ManagerBasedRlEnvCfg) -> None:
+  """Split height grids and proprioception aligned with the state machine."""
+  cfg.observations["actor"].terms = _teacher_terms(cfg, noisy=True)
+  cfg.observations["critic"].terms = _teacher_terms(cfg, noisy=False)
+  cfg.observations["critic"].terms.update(_privileged_terms())
+
+
+def _teacher_terms(
+  cfg: ManagerBasedRlEnvCfg,
+  *,
+  noisy: bool,
+) -> dict[str, ObservationTermCfg]:
+  """Shared actor and critic terms for the 17-D teacher student."""
+  terms = _state_machine_terms(cfg, noisy=noisy)
+  terms.pop("last_policy_action")
+  terms["actions"] = ObservationTermCfg(func=teacher_policy_action)
+  return terms
+
+
+def _configure_state_machine_observations(cfg: ManagerBasedRlEnvCfg) -> None:
+  """Height grids, proprioception, and a privileged critic.
+
+  The front grid is attached to the front torso and the rear grid to the back torso.
   Each is 1 m by 1 m with an 8×8 grid, so each field has 64 rays.
   The near edge sits 0.1 m outside that body's box. Tumble memory is the
   applied mode, oldest to newest, over the same 0.5 s the latch stays on.
+  The actor adds the gyro, hip angles, knee sin/cos, and the last policy action.
+  The critic sees those without noise, plus body velocity, joint rates, the
+  footprint profile, the terrain row, and the latch timers.
   """
   _install_split_scans(cfg)
-  command = ObservationTermCfg(
-    func=mdp.generated_commands,
-    params={"command_name": "twist"},
-  )
-  torques = ObservationTermCfg(
-    func=motor_torques,
-    params={"asset_cfg": SceneEntityCfg("robot")},
-  )
-  tumble_memory = _tumble_memory_term(cfg)
-  cfg.observations["actor"].terms = {
-    "height_scan_front": _split_height_scan_term("terrain_scan_front", noisy=True),
-    "height_scan_rear": _split_height_scan_term("terrain_scan_rear", noisy=True),
-    "projected_gravity": _projected_gravity_term(noisy=True),
-    "motor_torques": torques,
-    "command": command,
-    "tumble_applied": tumble_memory,
-  }
-  cfg.observations["critic"].terms = {
-    "height_scan_front": _split_height_scan_term("terrain_scan_front", noisy=False),
-    "height_scan_rear": _split_height_scan_term("terrain_scan_rear", noisy=False),
-    "projected_gravity": _projected_gravity_term(noisy=False),
+  cfg.observations["actor"].terms = _state_machine_terms(cfg, noisy=True)
+  cfg.observations["critic"].terms = _state_machine_terms(cfg, noisy=False)
+  cfg.observations["critic"].terms.update(_privileged_terms())
+
+
+def _state_machine_terms(
+  cfg: ManagerBasedRlEnvCfg,
+  *,
+  noisy: bool,
+) -> dict[str, ObservationTermCfg]:
+  """Terms shared by the actor and the critic."""
+  return {
+    "height_scan_front": _split_height_scan_term("terrain_scan_front", noisy=noisy),
+    "height_scan_rear": _split_height_scan_term("terrain_scan_rear", noisy=noisy),
+    "projected_gravity": _projected_gravity_term(noisy=noisy),
+    "base_ang_vel": _gyro_term(noisy=noisy),
+    "hip_pos": _hip_pos_term(noisy=noisy),
+    "knee_sincos": ObservationTermCfg(
+      func=joint_pos_sincos,
+      params={"asset_cfg": SceneEntityCfg("robot", joint_names=_KNEE_JOINTS)},
+    ),
     "motor_torques": ObservationTermCfg(
       func=motor_torques,
       params={"asset_cfg": SceneEntityCfg("robot")},
@@ -384,24 +474,67 @@ def _configure_state_machine_observations(cfg: ManagerBasedRlEnvCfg) -> None:
       func=mdp.generated_commands,
       params={"command_name": "twist"},
     ),
+    "last_policy_action": ObservationTermCfg(func=last_policy_action),
     "tumble_applied": _tumble_memory_term(cfg),
   }
 
 
-# Head and torso box half-lengths from walter_fs.xml. The scan center sits
-# half a field beyond the face, plus the 0.1 m gap.
-_HEAD_BOX_HALF_X = 0.15
-_TORSO_BOX_HALF_X = 0.23
+def _privileged_terms() -> dict[str, ObservationTermCfg]:
+  """Sim-only terms. These are not on the actor."""
+  return {
+    "base_lin_vel": ObservationTermCfg(
+      func=finite_builtin_sensor,
+      params={"sensor_name": "robot/imu_lin_vel"},
+    ),
+    "joint_vel": ObservationTermCfg(
+      func=finite_joint_vel_rel,
+      params={
+        "asset_cfg": SceneEntityCfg(
+          "robot", joint_names=_KNEE_JOINTS + _AXLE_JOINTS
+        ),
+      },
+    ),
+    "footprint_scan": ObservationTermCfg(
+      func=footprint_height_profile,
+      params={"sensor_name": "footprint_scan"},
+    ),
+    "terrain_level": ObservationTermCfg(
+      func=terrain_level,
+      params={"column_slots": _STATE_MACHINE_TERRAIN_COLUMN_SLOTS},
+    ),
+    "tumble_latch": ObservationTermCfg(func=tumble_latch_timers),
+  }
+
+
+def _gyro_term(*, noisy: bool) -> ObservationTermCfg:
+  """IMU angular velocity. The actor term gets the velocity-task gyro noise."""
+  return ObservationTermCfg(
+    func=finite_builtin_sensor,
+    params={"sensor_name": "robot/imu_ang_vel"},
+    noise=Unoise(n_min=-0.2, n_max=0.2) if noisy else None,
+  )
+
+
+def _hip_pos_term(*, noisy: bool) -> ObservationTermCfg:
+  """Hip angle relative to the default pose. Actor encoders are biased."""
+  return ObservationTermCfg(
+    func=finite_joint_pos_rel,
+    params={
+      "biased": noisy,
+      "asset_cfg": SceneEntityCfg("robot", joint_names=_HIP_JOINTS),
+    },
+  )
+
+
+# Outward face distance in each segment's body frame (+x forward).
+_FRONT_FACE_X = 0.15
+_BACK_FACE_X = 0.23
 _SPLIT_SCAN_GAP = 0.1
 _SPLIT_SCAN_SIZE = (1.0, 1.0)
 # Eight samples along each axis on a 1 m field (64 rays total).
 _SPLIT_SCAN_RESOLUTION = _SPLIT_SCAN_SIZE[0] / 7.0
-_FRONT_SCAN_OFFSET_X = _HEAD_BOX_HALF_X + _SPLIT_SCAN_GAP + _SPLIT_SCAN_SIZE[0] / 2
-_REAR_SCAN_OFFSET_X = -(_TORSO_BOX_HALF_X + _SPLIT_SCAN_GAP + _SPLIT_SCAN_SIZE[0] / 2)
-# Head-frame x of the third front-scan column. Columns past this are ignored.
-_MAX_PREDICTIVE_TUMBLE_DISTANCE = (
-  _HEAD_BOX_HALF_X + _SPLIT_SCAN_GAP + 2.0 * _SPLIT_SCAN_RESOLUTION
-)
+_FRONT_SCAN_OFFSET_X = _FRONT_FACE_X + _SPLIT_SCAN_GAP + _SPLIT_SCAN_SIZE[0] / 2
+_REAR_SCAN_OFFSET_X = -(_BACK_FACE_X + _SPLIT_SCAN_GAP + _SPLIT_SCAN_SIZE[0] / 2)
 
 
 def _install_split_scans(cfg: ManagerBasedRlEnvCfg) -> None:
@@ -473,11 +606,75 @@ def _split_height_scan_term(sensor_name: str, *, noisy: bool) -> ObservationTerm
   )
 
 
+def _configure_state_machine_contact(cfg: ManagerBasedRlEnvCfg) -> None:
+  """Remember every substep of belly force and terminate only on a hard hit."""
+  for sensor in cfg.scene.sensors or ():
+    if sensor.name == "torso_ground_touch":
+      sensor.history_length = _POLICY_DECIMATION
+  term = cfg.terminations.get("torso_contact")
+  if term is not None:
+    term.params["force_threshold"] = _HARD_TORSO_CONTACT_N
+
+
+def _install_footprint_scan(cfg: ManagerBasedRlEnvCfg) -> None:
+  """Add the privileged height grid used by the climb and downhill gates."""
+  sensors = [
+    sensor
+    for sensor in (cfg.scene.sensors or ())
+    if sensor.name != "footprint_scan"
+  ]
+  pattern = footprint_scan_pattern()
+  sensors.append(
+    RayCastSensorCfg(
+      name="footprint_scan",
+      frame=ObjRef(type="body", name="torso", entity="robot"),
+      ray_alignment="yaw",
+      pattern=GridPatternCfg(
+        size=pattern["size"],
+        resolution=pattern["resolution"],
+        offset=pattern["offset"],
+      ),
+      max_distance=_TERRAIN_SCAN_MAX_DISTANCE,
+      exclude_parent_body=True,
+      include_geom_groups=(0,),
+      debug_vis=False,
+    )
+  )
+  cfg.scene.sensors = tuple(sensors)
+
+
 def _configure_state_machine_rewards(cfg: ManagerBasedRlEnvCfg) -> None:
   """Register every reward-weight term. Zero weights stay in the table."""
+  knees = SceneEntityCfg("robot", joint_names=_KNEE_JOINTS)
+  cfg.rewards["track_linear_velocity"].weight = SM_FORWARD_TRACK_WEIGHT
+  cfg.rewards["stuck_x_velocity"].weight = SM_STUCK_SPEED_WEIGHT
   cfg.rewards["action_rate_l2"] = RewardTermCfg(
     func=policy_action_rate_l2,
-    weight=ACTION_RATE_WEIGHT,
+    weight=SM_ACTION_RATE_WEIGHT,
+  )
+  cfg.rewards["forward_progress"] = RewardTermCfg(
+    func=forward_progress,
+    weight=SM_FORWARD_PROGRESS_WEIGHT,
+    params={"command_name": "twist", "asset_cfg": SceneEntityCfg("robot")},
+  )
+  cfg.rewards["climb_tumble"] = RewardTermCfg(
+    func=climb_tumble,
+    weight=SM_CLIMB_TUMBLE_WEIGHT,
+    params={
+      "command_name": "twist",
+      "sensor_name": "footprint_scan",
+      "asset_cfg": knees,
+    },
+  )
+  cfg.rewards["unneeded_tumble"] = RewardTermCfg(
+    func=unneeded_tumble,
+    weight=SM_UNNEEDED_TUMBLE_WEIGHT,
+    params={"sensor_name": "footprint_scan"},
+  )
+  cfg.rewards["torso_contact"] = RewardTermCfg(
+    func=torso_contact_flag,
+    weight=SM_TORSO_CONTACT_WEIGHT,
+    params={"sensor_name": "torso_ground_touch"},
   )
   cfg.rewards["knee_stuck_tumble"].weight = KNEE_STUCK_TUMBLE_WEIGHT
   cfg.rewards["track_teacher"] = RewardTermCfg(
@@ -485,23 +682,18 @@ def _configure_state_machine_rewards(cfg: ManagerBasedRlEnvCfg) -> None:
     weight=TRACK_TEACHER_WEIGHT,
     params={"std": TRACK_TEACHER_STD, "sensor_name": "terrain_scan"},
   )
-  cfg.rewards["predictive_knee_tumble"] = RewardTermCfg(
-    func=predictive_knee_tumble,
-    weight=PREDICTIVE_KNEE_TUMBLE_WEIGHT,
-    params={
-      "command_name": "twist",
-      "asset_cfg": SceneEntityCfg("robot", joint_names=_KNEE_JOINTS),
-      "sensor_name": "terrain_scan_front",
-      "spacing": _SPLIT_SCAN_RESOLUTION,
-      "x_min": _HEAD_BOX_HALF_X + _SPLIT_SCAN_GAP,
-      "x_max": _HEAD_BOX_HALF_X + _SPLIT_SCAN_GAP + _SPLIT_SCAN_SIZE[0],
-      "max_predictive_tumble_distance": _MAX_PREDICTIVE_TUMBLE_DISTANCE,
-    },
-  )
   cfg.rewards["limb_torque"] = RewardTermCfg(
     func=limb_torque_l2,
     weight=LIMB_TORQUE_PENALTY_WEIGHT,
     params={"asset_cfg": SceneEntityCfg("robot")},
+  )
+  cfg.rewards["downhill_tumble"] = RewardTermCfg(
+    func=footprint_downhill_tumble,
+    weight=DOWNHILL_TUMBLE_WEIGHT,
+    params={
+      "sensor_name": "footprint_scan",
+      "asset_cfg": SceneEntityCfg("robot"),
+    },
   )
 
 
@@ -645,7 +837,7 @@ def _configure_simple_rewards(cfg: ManagerBasedRlEnvCfg) -> None:
     "head_level": RewardTermCfg(
       func=head_level,
       weight=HEAD_LEVEL_WEIGHT,
-      params={"asset_cfg": SceneEntityCfg("robot", joint_names=("head_joint",))},
+      params={"asset_cfg": SceneEntityCfg("robot", joint_names=("waist",))},
     ),
     "wheel_wheel_collision": RewardTermCfg(
       func=wheel_wheel_collision,
@@ -794,19 +986,19 @@ def _configure_actions(cfg: ManagerBasedRlEnvCfg) -> None:
   cfg.actions = {
     "hip_pos": JointPositionActionCfg(
       entity_name="robot",
-      actuator_names=(r".*_thigh_joint",),
+      actuator_names=(r".*_hip",),
       scale=HIP_ACTION_SCALE,
       use_default_offset=True,
-      clip={r".*_thigh_joint": (-HIP_ANGLE_LIMIT, HIP_ANGLE_LIMIT)},
+      clip={r".*_hip": (-HIP_ANGLE_LIMIT, HIP_ANGLE_LIMIT)},
     ),
     "knee_pos": RelativeJointPositionActionCfg(
       entity_name="robot",
-      actuator_names=(r".*_thigh_shin_joint",),
+      actuator_names=(r".*_knee",),
       scale=KNEE_ACTION_SCALE,
     ),
     "wheel_vel": JointVelocityActionCfg(
       entity_name="robot",
-      actuator_names=(r".*wheel_joint",),
+      actuator_names=(r".*_axle[12]",),
       scale=WHEEL_ACTION_SCALE,
       use_default_offset=False,
     ),
@@ -902,7 +1094,7 @@ def _configure_rewards(cfg: ManagerBasedRlEnvCfg) -> None:
     func=head_level,
     weight=-1.0,
     params={
-      "asset_cfg": SceneEntityCfg("robot", joint_names=("head_joint",)),
+      "asset_cfg": SceneEntityCfg("robot", joint_names=("waist",)),
     },
   )
   cfg.rewards["wheel_wheel_collision"] = RewardTermCfg(
@@ -965,6 +1157,19 @@ def _configure_terminations(cfg: ManagerBasedRlEnvCfg) -> None:
   )
 
 
+# Hard row of the state-machine rough task. rough-test tops out at 0.18 m.
+_ROUGH_TRAIN_STAIR_HEIGHT = (0.0, 0.22)
+# One column per type. Proportions only set how many robots spawn there.
+_ROUGH_TRAIN_PROPORTIONS = {
+  "pyramid_stairs_inv": 0.30,
+  "random_grid": 0.20,
+  "pyramid_stairs": 0.15,
+  "hf_pyramid_slope_inv": 0.125,
+  "hf_pyramid_slope": 0.075,
+  "flat": 0.05,
+  "random_rough": 0.05,
+  "wave_terrain": 0.05,
+}
 # Four fifths of the preset cube-field height is the hard row. Easier rows
 # keep the same linear ramp, so they land at 0, 1/3, and 2/3 of that cap.
 _CUBE_FIELD_HEIGHT_SCALE = 4.0 / 5.0
@@ -972,6 +1177,37 @@ _CUBE_FIELD_HEIGHT_SCALE = 4.0 / 5.0
 # ahead of the root and the tail 0.32 m behind, so the stock 0.4 m apron
 # cannot hold an approach without standing in the cubes or the next tile.
 _CUBE_APPROACH_BORDER_M = 1.5
+
+
+def _configure_rough_training_terrain(cfg: ManagerBasedRlEnvCfg) -> None:
+  """Raise rough stairs past rough-test and add a cube column.
+
+  The shared rough scene stays at 0.12 m stairs. rough-test multiplies those
+  by 1.5, so writing 0.22 m there would push the benchmark to 0.33 m.
+  """
+  assert cfg.scene.terrain is not None
+  generator = cfg.scene.terrain.terrain_generator
+  assert generator is not None
+  sub_terrains = dict(generator.sub_terrains)
+  for name in ("pyramid_stairs", "pyramid_stairs_inv"):
+    sub_terrains[name] = replace(
+      sub_terrains[name], step_height_range=_ROUGH_TRAIN_STAIR_HEIGHT
+    )
+  sub_terrains["random_rough"] = replace(
+    sub_terrains["random_rough"], scale_with_difficulty=True
+  )
+  grid = box_random_grid(proportion=_ROUGH_TRAIN_PROPORTIONS["random_grid"])
+  low, high = grid.grid_height_range
+  sub_terrains["random_grid"] = replace(
+    grid,
+    platform_width=2.0,
+    border_width=1.0,
+    grid_height_range=(low, low + (high - low) * _CUBE_FIELD_HEIGHT_SCALE),
+  )
+  ordered = {}
+  for name, proportion in _ROUGH_TRAIN_PROPORTIONS.items():
+    ordered[name] = replace(sub_terrains[name], proportion=proportion)
+  generator.sub_terrains = ordered
 
 
 def _swap_noise_for_random_grid(cfg: ManagerBasedRlEnvCfg) -> None:

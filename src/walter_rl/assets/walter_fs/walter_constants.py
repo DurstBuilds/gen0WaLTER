@@ -1,8 +1,9 @@
 """Full-scale WaLTER articulation, collisions, and nominal pose.
 
-The MJCF is produced by ``generate-walter --fs`` and checked in. Bare generator
-motors are removed here. mjlab DC motors apply the CubeMars torque-speed curves
-through the external joint gears, with the FS position and velocity gains.
+The MJCF is the hardware model from WaLTER_Modeling: CAD meshes for the legs
+and wheels, with each link mass spread through that visual shape. Meshes do
+not collide. Wheels use ellipsoids and the body uses small spheres. CubeMars
+DC motors replace the hardware generator actuators.
 """
 
 from __future__ import annotations
@@ -42,43 +43,25 @@ WHEEL_VELOCITY_GAIN = 15.0
 KNEE_ACTION_SCALE = 0.03
 WHEEL_ACTION_SCALE = 30.0
 
-# Settled torso height with every hinge at zero: wheel radius 0.1 m, shin
-# hung 0.18 m below the hip, so the wheel centers sit on the ground at z = 0.28.
-NOMINAL_ROOT_HEIGHT = 0.28
-
 # Hips are straight down at zero. ±70 deg is the mechanical stop, and the
 # position action uses that same range so a unit action can reach it.
 HIP_ANGLE_LIMIT = math.radians(70.0)
-_LEG_DROP_M = 0.18
-_WHEEL_RADIUS_M = 0.10
-_WHEEL_WIDTH_M = 0.10
-_TREAD_DEPTH_M = 0.008
-_N_TREAD = 16
-# Cylinder local z is the wheel spin axis (y). The compiler normalizes this quat.
-_WHEEL_AXIS_QUAT = (1.0, 1.0, 0.0, 0.0)
-_TIRE_RGBA = (0.05, 0.05, 0.05, 1.0)
-_TREAD_RGBA = (0.18, 0.18, 0.18, 1.0)
-_MARKER_RGBA = (0.85, 0.12, 0.12, 1.0)
-_HUB_RGBA = (0.55, 0.55, 0.55, 1.0)
-_VISUAL_GROUP = 1
-_COLLISION_VISUAL_GROUP = 3
-_WHEEL_BODIES = tuple(
-  f"{body}_{side}_{wheel}_wheel"
-  for body in ("torso", "head")
-  for side in ("left", "right")
-  for wheel in ("front", "rear")
-)
+# Knee is 0.180975 m below the hip. The wheel ellipsoid radius is 0.11 m.
+_LEG_DROP_M = 0.180975
+_WHEEL_RADIUS_M = 0.11
+# Settled torso (root) height with every hinge at zero.
+NOMINAL_ROOT_HEIGHT = _LEG_DROP_M + _WHEEL_RADIUS_M
 HIP_ACTION_SCALE = HIP_ANGLE_LIMIT
 # Clearance of the torso origin with the wheels planted: radius plus the
 # vertical component of the leg drop.
 RIDE_HEIGHT_MAX = NOMINAL_ROOT_HEIGHT
 RIDE_HEIGHT_MIN = _WHEEL_RADIUS_M + _LEG_DROP_M * math.cos(HIP_ANGLE_LIMIT)
 
-_WHEEL_GEOM = r".*_wheel_geom"
+_WHEEL_GEOM = r".*_wheel\d_col"
 _BUMP_GEOM = r".*_bump.*"
-_BODY_GEOM = r".*_geom"
 _BUMP_RADIUS = 0.04
-
+# Same hidden group as the wheel ellipsoids. Viewers draw groups 0–2.
+_COLLISION_GROUP = 3
 # Generator wheel solref is [-80800, -112] (stiffness plus negative damping).
 # Override to a passive time-constant / damping-ratio pair.
 _WHEEL_SOLREF = (0.02, 1.0)
@@ -91,7 +74,6 @@ def get_spec() -> mujoco.MjSpec:
   _name_body_geoms(spec)
   _limit_hip_joints(spec)
   _stabilize_wheel_contacts(spec)
-  _add_wheel_visuals(spec)
   _add_contact_bumps(spec)
   _strip_generator_actuators(spec)
   _add_imu(spec)
@@ -104,7 +86,7 @@ def _limit_hip_joints(spec: mujoco.MjSpec) -> None:
   Knee and wheel hinges stay unlimited so a leg assembly can wind through a step.
   """
   for joint in spec.joints:
-    if not joint.name.endswith("_thigh_joint"):
+    if not joint.name.endswith("_hip"):
       continue
     joint.limited = mujoco.mjtLimited.mjLIMITED_TRUE
     joint.range[:] = np.array([-HIP_ANGLE_LIMIT, HIP_ANGLE_LIMIT])
@@ -125,7 +107,7 @@ def get_walter_fs_robot_cfg() -> EntityCfg:
 
 
 def _name_body_geoms(spec: mujoco.MjSpec) -> None:
-  """Name the torso and head boxes so contact sensors can match them."""
+  """Name any unnamed geom so contact sensors can match it."""
   for body in spec.bodies:
     for geom in body.geoms:
       if not geom.name:
@@ -136,98 +118,8 @@ def _stabilize_wheel_contacts(spec: mujoco.MjSpec) -> None:
   """Replace the generator's negative wheel damping with a passive solref."""
   for body in spec.bodies:
     for geom in body.geoms:
-      if "wheel" in geom.name:
+      if geom.name.endswith("_col") and "wheel" in geom.name:
         geom.solref = np.array(_WHEEL_SOLREF)
-
-
-def _add_wheel_visuals(spec: mujoco.MjSpec) -> None:
-  """Add a tire, tread, hub, and spokes to every wheel, and hide the ellipsoid."""
-  for name in _WHEEL_BODIES:
-    body = spec.body(name)
-    _hide_collision_ellipsoid(body, f"{name}_geom")
-    _add_tire(body, name)
-    _add_treads(body, name)
-    _add_hub(body, name)
-    _add_spokes(body, name)
-
-
-def _hide_collision_ellipsoid(body: mujoco.MjsBody, geom_name: str) -> None:
-  """Move the wheel ellipsoid into a group the default viewer does not draw."""
-  for geom in body.geoms:
-    if geom.name != geom_name:
-      continue
-    geom.group = _COLLISION_VISUAL_GROUP
-    return
-  raise ValueError(f"missing wheel collision geom {geom_name}")
-
-
-def _add_visual(body: mujoco.MjsBody, **kwargs) -> None:
-  """Add a massless geom that does not participate in contact."""
-  body.add_geom(
-    contype=0,
-    conaffinity=0,
-    density=0.0,
-    group=_VISUAL_GROUP,
-    **kwargs,
-  )
-
-
-def _add_tire(body: mujoco.MjsBody, name: str) -> None:
-  """Add the tire, inset so the tread's outer face lands on the collision radius."""
-  radius = _WHEEL_RADIUS_M - _TREAD_DEPTH_M + 0.002
-  _add_visual(
-    body,
-    name=f"{name}_visual_tire",
-    type=mujoco.mjtGeom.mjGEOM_CYLINDER,
-    size=[radius, _WHEEL_WIDTH_M / 2, 0.0],
-    quat=list(_WHEEL_AXIS_QUAT),
-    rgba=list(_TIRE_RGBA),
-  )
-
-
-def _add_treads(body: mujoco.MjsBody, name: str) -> None:
-  """Place tread blocks around the tire. Block 0 is the rotation marker."""
-  arc = 2.0 * math.pi * _WHEEL_RADIUS_M / _N_TREAD
-  center_radius = _WHEEL_RADIUS_M - _TREAD_DEPTH_M / 2
-  half_size = [_TREAD_DEPTH_M / 2, 0.85 * _WHEEL_WIDTH_M / 2, 0.3 * arc]
-  for index in range(_N_TREAD):
-    phi = 2.0 * math.pi * index / _N_TREAD
-    color = _MARKER_RGBA if index == 0 else _TREAD_RGBA
-    _add_visual(
-      body,
-      name=f"{name}_visual_tread_{index}",
-      type=mujoco.mjtGeom.mjGEOM_BOX,
-      pos=[center_radius * math.cos(phi), 0.0, center_radius * math.sin(phi)],
-      quat=[math.cos(-phi / 2), 0.0, math.sin(-phi / 2), 0.0],
-      size=half_size,
-      rgba=list(color),
-    )
-
-
-def _add_hub(body: mujoco.MjsBody, name: str) -> None:
-  """Add a hub that stands slightly proud of both tire faces."""
-  _add_visual(
-    body,
-    name=f"{name}_visual_hub",
-    type=mujoco.mjtGeom.mjGEOM_CYLINDER,
-    size=[0.45 * _WHEEL_RADIUS_M, _WHEEL_WIDTH_M / 2 + 0.002, 0.0],
-    quat=list(_WHEEL_AXIS_QUAT),
-    rgba=list(_HUB_RGBA),
-  )
-
-
-def _add_spokes(body: mujoco.MjsBody, name: str) -> None:
-  """Add one radial spoke on each face so spin has no 180-degree ambiguity."""
-  for face in (1, -1):
-    sign = "pos" if face > 0 else "neg"
-    _add_visual(
-      body,
-      name=f"{name}_visual_spoke_{sign}",
-      type=mujoco.mjtGeom.mjGEOM_BOX,
-      pos=[0.45 * _WHEEL_RADIUS_M, face * (_WHEEL_WIDTH_M / 2 + 0.004), 0.0],
-      size=[0.42 * _WHEEL_RADIUS_M, 0.002, 0.008],
-      rgba=list(_MARKER_RGBA),
-    )
 
 
 def _strip_generator_actuators(spec: mujoco.MjSpec) -> None:
@@ -239,12 +131,12 @@ def _strip_generator_actuators(spec: mujoco.MjSpec) -> None:
 def _add_contact_bumps(spec: mujoco.MjSpec) -> None:
   """Add small spheres so body contact does not flood heightfield collisions.
 
-  The torso box and leg capsules each generate dozens of heightfield contacts
-  when they penetrate, and MuJoCo drops the pair once that count hits 50.
-  Wheels keep their ellipsoids. Belly and leg bumps are the only other
-  colliders, and torso/head bumps are what the fall sensor watches.
+  The torso boxes and leg meshes would each generate dozens of heightfield
+  contacts if they collided, and MuJoCo drops the pair once that count hits
+  50. Wheels keep their ellipsoids. Belly and leg bumps are the only other
+  colliders, and the torso bumps are what the fall sensor watches.
   """
-  _add_belly_bumps(spec.body("torso"), ( -0.15, 0.15))
+  _add_belly_bumps(spec.body("torso"), (-0.15, 0.15))
   _add_belly_bumps(spec.body("head"), (-0.08, 0.08))
   for body in spec.bodies:
     if body.name.endswith("_thigh"):
@@ -265,12 +157,15 @@ def _add_sphere(body: mujoco.MjsBody, name: str, pos: list[float]) -> None:
     size=[_BUMP_RADIUS, 0.0, 0.0],
     pos=pos,
     density=0.0,
+    group=_COLLISION_GROUP,
   )
 
 
 def _add_imu(spec: mujoco.MjSpec) -> None:
   """Add the gyro and velocimeter the velocity task reads as robot/imu_*."""
-  spec.body("torso").add_site(name="imu", pos=[0.0, 0.0, 0.0], size=[0.01, 0.01, 0.01])
+  spec.body("torso").add_site(
+    name="imu", pos=[0.0, 0.0, 0.0], size=[0.01, 0.01, 0.01]
+  )
   spec.add_sensor(
     name="imu_ang_vel",
     type=mujoco.mjtSensor.mjSENS_GYRO,
@@ -286,41 +181,38 @@ def _add_imu(spec: mujoco.MjSpec) -> None:
 
 
 _COLLISION = CollisionCfg(
-  geom_names_expr=(_WHEEL_GEOM, _BUMP_GEOM, _BODY_GEOM),
-  # Boxes and capsules stay visual. Wheels and small bumps hit the terrain
+  geom_names_expr=(_WHEEL_GEOM, _BUMP_GEOM),
+  # Meshes and torso boxes stay visual. Wheels and small bumps hit the terrain
   # (contype 1) but not each other (conaffinity 0).
   # Bit 1 is terrain. Bit 2 is wheel-to-wheel only. Wheels keep terrain
   # contact through contype, and conaffinity 2 lets them hit each other
   # without also hitting the belly and leg bumps.
-  contype={_WHEEL_GEOM: 3, _BUMP_GEOM: 1, _BODY_GEOM: 0},
-  conaffinity={_WHEEL_GEOM: 2, _BUMP_GEOM: 0, _BODY_GEOM: 0},
-  condim={_WHEEL_GEOM: 6, _BUMP_GEOM: 3, _BODY_GEOM: 3},
-  priority={_WHEEL_GEOM: 1, _BUMP_GEOM: 1, _BODY_GEOM: 0},
+  contype={_WHEEL_GEOM: 3, _BUMP_GEOM: 1},
+  conaffinity={_WHEEL_GEOM: 2, _BUMP_GEOM: 0},
+  condim={_WHEEL_GEOM: 6, _BUMP_GEOM: 3},
+  priority={_WHEEL_GEOM: 1, _BUMP_GEOM: 1},
   friction={
     _WHEEL_GEOM: _WHEEL_FRICTION,
     _BUMP_GEOM: (0.8,),
-    _BODY_GEOM: (0.6,),
   },
   solref={
     _WHEEL_GEOM: _WHEEL_SOLREF,
     _BUMP_GEOM: (0.02, 1.0),
-    _BODY_GEOM: (0.02, 1.0),
   },
 )
 
 
-# Joint pattern, motor id, external gear, stiffness, damping. Hip pattern is
-# only the thigh joint; the knee name is ``thigh_shin_joint``.
+# Joint pattern, motor id, external gear, stiffness, damping.
 _DC_MOTORS = (
-  (".*_thigh_joint", "ak70_10_kv100", HIP_GEAR_RATIO, HIP_STIFFNESS, HIP_DAMPING),
+  (".*_hip", "ak70_10_kv100", HIP_GEAR_RATIO, HIP_STIFFNESS, HIP_DAMPING),
   (
-    ".*_thigh_shin_joint",
+    ".*_knee",
     "ak80_64_kv80",
     KNEE_GEAR_RATIO,
     KNEE_STIFFNESS,
     KNEE_DAMPING,
   ),
-  (".*wheel_joint", "ak10_9_v2_kv60", WHEEL_GEAR_RATIO, 0.0, WHEEL_VELOCITY_GAIN),
+  (".*_axle[12]", "ak10_9_v2_kv60", WHEEL_GEAR_RATIO, 0.0, WHEEL_VELOCITY_GAIN),
 )
 
 

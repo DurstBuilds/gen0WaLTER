@@ -1,7 +1,7 @@
 """PD loops that fill the Walter action vector.
 
 Hips, knees, and wheels use the same action terms as the velocity task.
-``head_joint`` is fixed at 0 degrees and is not an action.
+``waist`` is fixed at 0 degrees and is not an action.
 """
 
 from __future__ import annotations
@@ -24,13 +24,13 @@ from walter_rl.assets.walter_fs.walter_constants import (
 )
 from walter_rl.control.full_body_pd.gains import FullBodyPdGains, default_gains
 
-_FRONT_HIPS = ("head_left_thigh_joint", "head_right_thigh_joint")
-_REAR_HIPS = ("torso_left_thigh_joint", "torso_right_thigh_joint")
-_LEFT_KNEES = ("torso_left_thigh_shin_joint", "head_left_thigh_shin_joint")
-_RIGHT_KNEES = ("torso_right_thigh_shin_joint", "head_right_thigh_shin_joint")
-_LEFT_THIGHS = ("torso_left_thigh", "head_left_thigh")
-_RIGHT_THIGHS = ("torso_right_thigh", "head_right_thigh")
-_WAIST = "head_joint"
+_FRONT_HIPS = ("fl_hip", "fr_hip")
+_REAR_HIPS = ("bl_hip", "br_hip")
+_LEFT_KNEES = ("bl_knee", "fl_knee")
+_RIGHT_KNEES = ("br_knee", "fr_knee")
+_LEFT_THIGHS = ("bl_thigh", "fl_thigh")
+_RIGHT_THIGHS = ("br_thigh", "fr_thigh")
+_WAIST = "waist"
 # A half turn swaps which wheel is forward, so it is not the same zero.
 _KNEE_PERIOD_RAD = 2.0 * math.pi
 # Knee groups are (rear, front). Positive rear rotation and negative front
@@ -57,9 +57,13 @@ class FullBodyPdController:
     self,
     env: ManagerBasedRlEnv,
     gains: FullBodyPdGains | None = None,
+    control_dt: float | None = None,
   ) -> None:
     self._env = env
     self._gains = gains if gains is not None else default_gains()
+    # None follows the environment step. A faster inner loop passes its own dt.
+    self._control_dt = control_dt
+    self.skip_fresh_clear = False
     columns = _action_columns(env)
     robot = env.scene["robot"]
     device = env.device
@@ -172,7 +176,7 @@ class FullBodyPdController:
     if bool(just_on.any()):
       measured = robot.data.joint_pos[just_on][:, self._knee_ids]
       self._forced_knee_ref[just_on] = measured
-    self._forced_knee_ref[force] += self._gains.tumble.rate * self._env.step_dt
+    self._forced_knee_ref[force] += self._gains.tumble.rate * self._dt
     self._forced_knee_ref[~force] = 0.0
     self._forced_on = force.detach().clone()
 
@@ -232,12 +236,22 @@ class FullBodyPdController:
       _write_velocity_limit(actuator, limit)
     self._speed_is_rated = rated
 
+  @property
+  def _dt(self) -> float:
+    """Integration step for the knee reference, settle, and speed lag."""
+    if self._control_dt is None:
+      return self._env.step_dt
+    return self._control_dt
+
   def _forget_finished_episodes(self) -> None:
     """Drop tumble state on environments that just reset.
 
     The mask write stays on device. Reading ``any()`` back to the host would
-    sync the GPU on every control step.
+    sync the GPU on every control step. ``skip_fresh_clear`` lets a faster
+    inner loop clear once per policy step instead of once per tick.
     """
+    if self.skip_fresh_clear:
+      return
     fresh = self._env.episode_length_buf == 0
     self._clear_tumble(fresh)
 
@@ -283,7 +297,7 @@ class FullBodyPdController:
     Leak when the command is low or the speed error is within ``min_speed_error``.
     """
     command = self._env.command_manager.get_term("twist")
-    dt = self._env.step_dt
+    dt = self._dt
     cmd_x = command.vel_command_b[:, 0]
     error = cmd_x - robot.data.root_link_lin_vel_b[:, 0]
     gains = self._gains.tumble
@@ -297,7 +311,7 @@ class FullBodyPdController:
     just_on = self._tumbling & ~was_tumbling
     if bool(just_on.any()):
       self._knee_ref[just_on] = robot.data.joint_pos[just_on][:, self._knee_ids]
-    self._knee_ref[self._tumbling] += self._gains.tumble.rate * self._env.step_dt
+    self._knee_ref[self._tumbling] += self._gains.tumble.rate * self._dt
 
   def _settle_knees(self, robot, was_tumbling: torch.Tensor) -> None:
     """Carry each knee to the roll pose on the latched turn, then stop."""
@@ -333,7 +347,7 @@ class FullBodyPdController:
       measured,
       goal,
       self._gains.tumble.rate,
-      self._env.step_dt,
+      self._dt,
     )
     self._settle_arrived = self._settling & arrived
     self._knee_ref = torch.where(self._settling, held, self._knee_ref)
@@ -549,7 +563,7 @@ def _knee_ctrl_ids(robot) -> torch.Tensor:
   ids = [
     actuator.global_ctrl_ids
     for actuator in robot.actuators
-    if any("thigh_shin_joint" in name for name in actuator.target_names)
+    if any(name.endswith("_knee") for name in actuator.target_names)
   ]
   if not ids:
     raise KeyError("No knee position actuators found.")
@@ -564,7 +578,7 @@ def _write_knee_servo(env, ctrl_ids: torch.Tensor, kp: float, kd: float) -> None
   """
   robot = env.scene["robot"]
   for actuator in robot.actuators:
-    if not any("thigh_shin_joint" in name for name in actuator.target_names):
+    if not any(name.endswith("_knee") for name in actuator.target_names):
       continue
     if getattr(actuator, "stiffness", None) is not None:
       _write_python_knee_servo(actuator, kp, kd)
@@ -715,7 +729,7 @@ def _group(robot, columns: dict[str, int], names: tuple[str, ...], device) -> _J
 def _wheel_actuator(robot):
   """The DC motor group that drives the wheel joints."""
   for actuator in robot.actuators:
-    if any("wheel_joint" in name for name in actuator.target_names):
+    if any("_axle" in name for name in actuator.target_names):
       return actuator
   raise KeyError("No wheel actuators found.")
 
@@ -731,10 +745,11 @@ def _clip_wheel_action(speed: float, omega_max: float) -> float:
 
 def _wheel_columns(robot, columns: dict[str, int], side: str, device) -> torch.Tensor:
   """Action columns for the four wheels on ``side`` (``left`` or ``right``)."""
-  _ids, names = robot.find_joints(".*wheel_joint")
-  picked = [columns[name] for name in names if f"_{side}_" in name]
+  _ids, names = robot.find_joints(r".*_axle[12]")
+  prefixes = ("fl_", "bl_") if side == "left" else ("fr_", "br_")
+  picked = [columns[name] for name in names if name.startswith(prefixes)]
   if len(picked) != 4:
-    raise KeyError(f"Expected 4 {side} wheels, found {picked}")
+    raise KeyError(f"Expected 4 {side} wheels, found {names}")
   return torch.tensor(picked, dtype=torch.long, device=device)
 
 

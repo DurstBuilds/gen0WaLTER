@@ -1,7 +1,9 @@
 """Train a WaLTER FS velocity policy with PPO.
 
-The default run trains a 1-D tumble toggle on top of the full-body PD
-controller. Pass ``--teacher`` for the 16-D teacher-student stack.
+The default run trains two actions on top of the full-body PD controller:
+a tumble toggle and a tank hip offset from 0 to 30 degrees. Tank Mode
+stays on and the tank knee command stays at zero. Pass ``--teacher`` for
+the 17-D teacher-student stack.
 
 Examples:
   python scripts/train.py --num-envs 8 --max-iterations 2
@@ -9,11 +11,9 @@ Examples:
   python scripts/train.py --teacher --num-envs 8 --max-iterations 2
   python scripts/train.py --teacher --task rough-test --max-iterations 500
   python scripts/train.py --resume logs/rsl_rl/.../model_500.pt --max-iterations 500
-  python scripts/train.py --resume research/logs/training/.../model_500.pt
 
-New runs write under ``research/logs/training``. Pass ``--log-root`` to put
-them somewhere else. Checkpoints already in ``logs/rsl_rl/`` stay where they
-are and still load through ``--resume`` with an explicit path.
+New runs write under ``logs/rsl_rl``. Pass ``--log-root`` to put them
+somewhere else. Checkpoints load through ``--resume`` with an explicit path.
 
 ``--resume`` loads the weights, optimizer, and iteration counter.
 ``--max-iterations`` is how many additional updates to run. The new
@@ -22,7 +22,7 @@ checkpoints go in a fresh timestamp directory under the log root.
 ``--task`` matches playback: ``flat``, ``rough``, ``rough-test``, and
 ``stairs``. The default is ``flat``. Scalars are written as TensorBoard
 events in the run log directory. View them with
-``uv run tensorboard --logdir research/logs/training``.
+``uv run tensorboard --logdir logs/rsl_rl``.
 """
 
 from __future__ import annotations
@@ -36,10 +36,14 @@ from rsl_rl.runners import OnPolicyRunner
 
 from mjlab.envs import ManagerBasedRlEnv
 
-from walter_rl.rl.ppo import walter_ppo_runner_cfg
+from walter_rl.rl.ppo import state_machine_ppo_runner_cfg, teacher_ppo_runner_cfg
 from walter_rl.rl.state_machine_env import StateMachineEnv
 from walter_rl.rl.teacher_env import TeacherStudentEnv
-from walter_rl.rl.vecenv import RslRlVecEnvWrapper, StateMachineVecEnv
+from walter_rl.rl.vecenv import (
+  RslRlVecEnvWrapper,
+  StateMachineVecEnv,
+  TeacherStudentVecEnv,
+)
 from walter_rl.tasks.velocity.config.walter_fs.env_cfgs import (
   RlSceneName,
   _TRAIN_ANG_VEL_Z,
@@ -49,9 +53,8 @@ from walter_rl.tasks.velocity.config.walter_fs.env_cfgs import (
 )
 
 _STATE_MACHINE_CLIP = 1.0
-_STATE_MACHINE_HIDDEN = (256, 128, 64)
 
-_DEFAULT_LOG_ROOT = Path("research/logs/training")
+_DEFAULT_LOG_ROOT = Path("logs/rsl_rl")
 _TASKS = ("flat", "rough", "rough-test", "stairs")
 
 
@@ -82,7 +85,7 @@ def main() -> None:
     resume,
     args.log_root,
     clip_actions,
-    _STATE_MACHINE_HIDDEN if not args.teacher else (512, 256, 128),
+    state_machine=not args.teacher,
   )
 
 
@@ -94,20 +97,30 @@ def _learn(
   resume: Path | None,
   log_root: Path,
   clip_actions: float | None,
-  hidden_dims: tuple[int, ...],
+  *,
+  state_machine: bool,
 ) -> Path:
   """Run PPO and return the directory that holds the checkpoints."""
-  agent_cfg = walter_ppo_runner_cfg(
-    max_iterations=max_iterations,
-    experiment_name=experiment_name,
-    clip_actions=clip_actions,
-    hidden_dims=hidden_dims,
-  )
+  if state_machine:
+    agent_cfg = state_machine_ppo_runner_cfg(
+      max_iterations=max_iterations,
+      experiment_name=experiment_name,
+      clip_actions=clip_actions,
+    )
+  else:
+    agent_cfg = teacher_ppo_runner_cfg(
+      max_iterations=max_iterations,
+      experiment_name=experiment_name,
+      clip_actions=clip_actions,
+    )
   log_dir = log_root / experiment_name / datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
   log_dir.mkdir(parents=True, exist_ok=True)
-  wrapper_cls = (
-    StateMachineVecEnv if isinstance(env, StateMachineEnv) else RslRlVecEnvWrapper
-  )
+  if isinstance(env, StateMachineEnv):
+    wrapper_cls = StateMachineVecEnv
+  elif isinstance(env, TeacherStudentEnv):
+    wrapper_cls = TeacherStudentVecEnv
+  else:
+    wrapper_cls = RslRlVecEnvWrapper
   wrapped = wrapper_cls(env, clip_actions=agent_cfg["clip_actions"])
   runner = OnPolicyRunner(wrapped, agent_cfg, log_dir=str(log_dir), device=device)
   _load_resume(runner, resume)
@@ -189,7 +202,7 @@ def _parse_args() -> argparse.Namespace:
   parser.add_argument(
     "--teacher",
     action="store_true",
-    help="Train the 16-D teacher-student policy instead of the tumble toggle.",
+    help="Train the 17-D teacher-student policy instead of the tumble toggle and tank hip.",
   )
   parser.add_argument(
     "--teacher-only-reward",
@@ -210,8 +223,7 @@ def _parse_args() -> argparse.Namespace:
     type=Path,
     default=_DEFAULT_LOG_ROOT,
     help=(
-      "Directory for new PPO logs. Defaults to research/logs/training. "
-      "Existing logs/rsl_rl checkpoints are left in place."
+      "Directory for new PPO logs. Defaults to logs/rsl_rl."
     ),
   )
   parser.add_argument(

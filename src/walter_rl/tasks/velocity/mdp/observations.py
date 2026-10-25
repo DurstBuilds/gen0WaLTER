@@ -136,6 +136,78 @@ def _rated_torque_for_actuator(name: str) -> float:
   return _HIP_RATED_TORQUE_NM
 
 
+def last_policy_action(env: ManagerBasedRlEnv) -> torch.Tensor:
+  """Policy action applied on this step, shape ``(num_envs, 2)``.
+
+  Reset environments report zeros. The hip column is already mapped into
+  ``[0, 1]``. The state machine uses this term. The teacher student uses
+  ``teacher_policy_action`` instead.
+  """
+  action = getattr(env, "policy_action", None)
+  if not isinstance(action, torch.Tensor):
+    return torch.zeros(env.num_envs, 2, device=env.device)
+  return action
+
+
+# Hips, wheels, drive_state, and knee positions. Matches POLICY_ACTION_DIM.
+_TEACHER_POLICY_ACTION_DIM = 17
+
+
+def teacher_policy_action(env: ManagerBasedRlEnv) -> torch.Tensor:
+  """Stored teacher policy action, shape ``(num_envs, 17)``.
+
+  Unset and reset rows are zero. This is the vector the student output,
+  not the 16-D plant command in ``last_action``.
+  """
+  action = getattr(env, "policy_action", None)
+  width = _TEACHER_POLICY_ACTION_DIM
+  if not isinstance(action, torch.Tensor) or action.shape[-1] != width:
+    return torch.zeros(env.num_envs, width, device=env.device)
+  return action
+
+
+def terrain_level(
+  env: ManagerBasedRlEnv,
+  column_slots: int = 8,
+) -> torch.Tensor:
+  """One-hot terrain column plus the row scaled to ``[0, 1]``.
+
+  ``column_slots`` is fixed across state-machine scenes so critic weights
+  from a ``rough`` run load on ``rough-test``, flat, or stairs playback.
+  Unused one-hot entries stay zero when the scene has fewer columns.
+  """
+  out_width = column_slots + 1
+  terrain = env.scene.terrain
+  generator = None if terrain is None else terrain.cfg.terrain_generator
+  if generator is None or terrain.terrain_origins is None:
+    return torch.zeros(env.num_envs, out_width, device=env.device)
+  count = len(generator.sub_terrains)
+  if count > column_slots:
+    raise ValueError(
+      f"Terrain has {count} columns but terrain_level only reserves "
+      f"{column_slots} one-hot slots."
+    )
+  columns = torch.zeros(env.num_envs, column_slots, device=env.device)
+  columns.scatter_(1, terrain.terrain_types.unsqueeze(-1).long(), 1.0)
+  span = max(terrain.max_terrain_level - 1, 1)
+  row = (terrain.terrain_levels.float() / span).unsqueeze(-1)
+  return torch.cat((columns, row), dim=-1)
+
+
+def tumble_latch_timers(env: ManagerBasedRlEnv) -> torch.Tensor:
+  """Remaining on-dwell and off-dwell, each scaled by the full dwell.
+
+  Shape is ``(num_envs, 2)``. Both are 0 when the latch is idle.
+  """
+  on_hold = getattr(env, "_tumble_hold", None)
+  off_hold = getattr(env, "_tumble_off_hold", None)
+  dwell = getattr(env, "_min_tumble_steps", None)
+  if not isinstance(on_hold, torch.Tensor) or not isinstance(off_hold, torch.Tensor):
+    return torch.zeros(env.num_envs, 2, device=env.device)
+  scale = float(dwell) if isinstance(dwell, int) and dwell > 0 else 1.0
+  return torch.stack((on_hold.float() / scale, off_hold.float() / scale), dim=-1)
+
+
 def tumble_applied(env: ManagerBasedRlEnv) -> torch.Tensor:
   """Tumble mode applied to the PD this step, including the minimum on-time.
 

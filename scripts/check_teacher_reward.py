@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import torch
 
-from walter_rl.rl.teacher_env import TeacherStudentEnv
+from walter_rl.rl.teacher_env import POLICY_ACTION_DIM, TeacherStudentEnv
 from walter_rl.tasks.velocity.config.walter_fs.env_cfgs import (
   FORWARD_TRACK_WEIGHT,
   TRACK_TEACHER_WEIGHT,
@@ -81,11 +81,12 @@ def _rollout(env: TeacherStudentEnv, *, follow_teacher: bool) -> dict[str, float
   env.reset()
   totals: dict[str, float] = {}
   mse_total = 0.0
-  zeros = torch.zeros(
-    env.num_envs,
-    env.action_manager.total_action_dim,
-    device=env.device,
+  width = (
+    env.action_manager.total_action_dim
+    if follow_teacher
+    else POLICY_ACTION_DIM
   )
+  zeros = torch.zeros(env.num_envs, width, device=env.device)
   for _ in range(_STEPS):
     _pin_command(env)
     env.step(zeros)

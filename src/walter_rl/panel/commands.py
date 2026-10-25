@@ -71,7 +71,7 @@ def checkpoint_file(root: Path, raw: object) -> Path:
     raise PanelError("Checkpoint not found.")
   if not is_checkpoint_path(root, path):
     raise PanelError(
-      "Checkpoint must be under research/logs/training or logs/rsl_rl."
+      "Checkpoint must be under logs/rsl_rl."
     )
   return path
 

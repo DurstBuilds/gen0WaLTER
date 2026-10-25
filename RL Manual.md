@@ -16,7 +16,7 @@ Playback covers both kinds of controller. `scripts/play.py --policy pd` runs the
 - PPO through rsl-rl 5.4 (`OnPolicyRunner`) on the vendored mjlab `ManagerBasedRlEnv`.
 - Separate actor and critic MLPs, observation normalization, and a Gaussian policy.
 - Teacher-student training: the PD action is snapshotted before physics, then scored with an exponential match reward of weight `0.5`.
-- TensorBoard scalars under each run log directory (default root `research/logs/training/`).
+- TensorBoard scalars under each run log directory (default root `logs/rsl_rl/`).
 - Checkpoint playback in the Viser browser viewer or MuJoCo's native viewer, and the existing PD play scripts stay available.
 
 # User Manual
@@ -145,12 +145,12 @@ The seed is `42` in both the environment and the runner. It is not a CLI flag.
 
 | Output | Location |
 | --- | --- |
-| Checkpoints and TensorBoard | `research/logs/training/walter_fs_velocity/<YYYY-MM-DD_HH-MM-SS>/` (override with `--log-root`) |
-| Teacher run | `research/logs/training/walter_fs_teacher/<timestamp>/` |
+| Checkpoints and TensorBoard | `logs/rsl_rl/walter_fs_velocity/<YYYY-MM-DD_HH-MM-SS>/` (override with `--log-root`) |
+| Teacher run | `logs/rsl_rl/walter_fs_teacher/<timestamp>/` |
 | Other scenes | Same folders with a `_<task>` suffix, for example `walter_fs_teacher_rough-test` |
-| Older runs | `logs/rsl_rl/` still loads through `--resume` with an explicit checkpoint path |
+| Resume | Any checkpoint path under `--log-root` loads through `--resume` |
 
-Checkpoints are saved every 50 iterations (`save_interval` in `walter_ppo_runner_cfg`) and at the end of the run. `model_<iteration>.pt` is the file `scripts/play.py` loads. View scalars with `uv run tensorboard --logdir research/logs/training`.
+Checkpoints are saved every 50 iterations (`save_interval` in `walter_ppo_runner_cfg`) and at the end of the run. `model_<iteration>.pt` is the file `scripts/play.py` loads. View scalars with `uv run tensorboard --logdir logs/rsl_rl`.
 
 ### Commands and rewards
 
@@ -247,7 +247,6 @@ gen0WaLTER/
 │       ├── env.py
 │       └── policy.py
 ├── mjlab/
-├── research/logs/training/
 └── logs/rsl_rl/
 ```
 
@@ -263,7 +262,7 @@ gen0WaLTER/
 - `rewards.py` holds `track_teacher_action` and `teacher_action_mse`.
 - `control/full_body_pd/` is the teacher. `_add_waist_lock` gives the RL task the same waist actuator, absolute knees, and hip and knee gains as the PD controller, and it copies the shared articulation before editing it.
 - `mjlab/` is the vendored environment library. This repo trains with rsl-rl directly and does not use an upstream mjlab `train.py`.
-- `research/logs/training/` and `logs/rsl_rl/` are run outputs. Leave them out of commits.
+- `logs/rsl_rl/` is run output. Leave it out of commits.
 
 # Developer Notes
 

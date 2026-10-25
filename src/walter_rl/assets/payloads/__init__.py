@@ -26,13 +26,12 @@ class Payload:
   quat: tuple[float, float, float, float] = (1.0, 0.0, 0.0, 0.0)
 
 
-# Mount the rider on the torso top face. The box half-height is 0.09 m, and
-# +x faces the head.
+# Mount the rider on the head. The top face is z = 0.09 m and +x faces forward.
 _PAYLOADS: dict[str, Payload] = {
   "rider": Payload(
     name="rider",
     xml_path=_PAYLOAD_DIR / "rider.xml",
-    parent_body="torso",
+    parent_body="head",
     pos=(0.1, 0.0, 0.09),
   ),
 }

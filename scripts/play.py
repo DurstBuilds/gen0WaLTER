@@ -21,7 +21,7 @@ from walter_rl.assets.payloads import available_payloads
 from walter_rl.control.full_body_pd.env import TaskName, make_pd_env
 from walter_rl.control.full_body_pd.policy import FullBodyPdPolicy
 from walter_rl.rl.checkpoint_policy import CheckpointPolicy
-from walter_rl.rl.ppo import walter_ppo_runner_cfg
+from walter_rl.rl.ppo import state_machine_ppo_runner_cfg
 from walter_rl.rl.state_machine_env import StateMachineEnv
 from walter_rl.rl.vecenv import StateMachineVecEnv
 from walter_rl.tasks.velocity.config.walter_fs.env_cfgs import (
@@ -30,7 +30,6 @@ from walter_rl.tasks.velocity.config.walter_fs.env_cfgs import (
 from walter_rl.viewer import WalterViserPlayViewer
 
 _STATE_MACHINE_CLIP = 1.0
-_STATE_MACHINE_HIDDEN = (256, 128, 64)
 
 _TASKS = ("flat", "rough", "rough-test", "stairs")
 
@@ -74,11 +73,10 @@ def _checkpoint_policy(
   cfg = walter_fs_state_machine_env_cfg(play=True, task=args.task)
   cfg.scene.num_envs = args.num_envs
   env = StateMachineEnv(cfg, device=device)
-  agent_cfg = walter_ppo_runner_cfg(
+  agent_cfg = state_machine_ppo_runner_cfg(
     max_iterations=1,
     experiment_name="walter_fs_play",
     clip_actions=_STATE_MACHINE_CLIP,
-    hidden_dims=_STATE_MACHINE_HIDDEN,
   )
   wrapped = StateMachineVecEnv(env, clip_actions=agent_cfg["clip_actions"])
   runner = OnPolicyRunner(wrapped, agent_cfg, log_dir=None, device=device)

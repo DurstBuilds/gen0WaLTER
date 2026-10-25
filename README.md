@@ -1,26 +1,25 @@
 # gen0WaLTER
 
-![License](https://img.shields.io/badge/License-INSERT__LICENSE-blue)
-![Build Status](https://img.shields.io/badge/Build-INSERT__STATUS-lightgrey)
+![Build Status](https://img.shields.io/badge/Build-In_Progress-lightgrey)
 ![Version](https://img.shields.io/badge/Version-0.1.0-blue)
 
 **gen0WaLTER** is a simulation package for the full-scale WaLTER robot. The package version is **0.1.0**. WaLTER is a wheeled-leg platform: four hip joints, four continuous knee joints, eight driven wheels, and a waist (`head_joint`) held at zero.
 
-The default learned policy is a state machine on top of the classical full-body PD controller. PPO outputs one number. A positive value latches tumbling: every knee spins about +Y and every wheel holds `tumble.wheel_speed`. A non-positive value leaves the PD speed, yaw, pitch, and roll loops in charge. Each edge is held for 0.5 s. The stall-integral gate stays out of this loop; `StateMachineEnv` writes the latch with `FullBodyPdController.set_tumble_command`.
+The default learned policy is a state machine on top of the classical full-body PD controller. PPO outputs two numbers on `[-1, 1]` (Beta actor, clipped). A positive first value latches tumbling: every knee spins about +Y and every wheel holds `tumble.wheel_speed`. A non-positive value leaves the PD speed, yaw, pitch, and roll loops in charge. Each tumble edge is held for 0.5 s. The second value maps to a Tank Mode hip offset from 0° to 30° via `(a + 1) / 2` (network −1 → 0°, 0 → 15°, +1 → 30°). Tank Mode stays on and the tank knee command stays at 0°. The stall-integral gate stays out of this loop; `StateMachineEnv` writes the latch with `FullBodyPdController.set_tumble_command`.
 
-`--teacher` is the other training path. The student sends the same 16-D joint command the PD controller uses (four hips, four absolute knee angles, eight wheel velocities). `TeacherStudentEnv` stores the PD action from the state the student saw, then steps the student action.
+`--teacher` is the other training path. The student outputs 17 numbers (hips, wheels, drive state, and knee targets). `TeacherStudentEnv` stores the PD plant action from the state the student saw, then steps the student action.
 
 Playback covers the classical PD controller, the smooth-tumble variant, and a state-machine checkpoint. A local browser panel can start one play or train process. How an MJCF file becomes a joint torque is in [`SIMULATION.md`](SIMULATION.md). Masses and link lengths are in [`src/walter_rl/assets/walter_fs/README.md`](src/walter_rl/assets/walter_fs/README.md).
 
 ## Key Features
 
-- State-machine PPO: a 1-D tumble toggle, clipped to ±1, with actor and critic MLPs of sizes 256, 128, and 64. The PD controller still writes the 16 joint targets.
-- Front and rear height grids (1 m × 1 m, 64 rays each), projected gravity, rated motor torques, the twist command, and 0.5 s of applied tumble memory.
-- Active state-machine rewards: body-forward tracking (2.0), yaw-rate tracking (1.0), predictive knee tumble (2.0), uprightness (0.1), stuck-speed penalty (−1.0), toggle rate (−0.1), and limb-torque penalty (−0.01).
-- Optional 16-D teacher-student run (`--teacher`) with MLPs of sizes 512, 256, and 128. The match reward weight is currently 0, so that term is registered and skipped.
+- State-machine PPO at 10 Hz: tumble toggle plus 0–30° tank hip, Beta actor on `[-1, 1]`, actor MLP 256/128/64, critic MLP 512/256/128. The PD controller still writes the 16 joint targets each physics substep.
+- Front and rear height grids (1 m × 1 m, 64 rays each), IMU terms, knee encoding, motor torques, the twist command, last policy action, and 0.5 s of applied tumble memory.
+- State-machine rewards (`SM_*` in `env_cfgs.py`): forward tracking (1.0), forward progress (2.0), yaw tracking (1.0), climb tumble (1.5), unneeded tumble (−1.0), downhill tumble (−6.0 per radian nose-down while latched), uprightness (0.1), action rate (−0.1), torso contact (−2.0), limb torque (−0.005), stuck speed (−0.5).
+- Optional 17-D teacher-student run (`--teacher`) at 50 Hz with the same scan layout and MLP widths (Gaussian actor). The match reward weight is currently 0, so that term is registered and skipped.
 - Classical full-body PD and a smooth-tumble variant that holds hip height level while the knees spin.
 - Four scenes: `flat`, `rough`, `rough-test`, and `stairs`.
-- rsl-rl 5.4 `OnPolicyRunner`, TensorBoard logs under `research/logs/training/`, and a localhost panel for one play or train job.
+- rsl-rl 5.4 `OnPolicyRunner`, TensorBoard logs under `logs/rsl_rl/`, and a localhost panel for one play or train job.
 - Checked-in full-scale MJCF (`walter_fs.xml`), with generator motors stripped and CubeMars DC motor actuators attached.
 - Viser joystick for forward speed, yaw rate, hip angle, knee angle, Tank Mode, and the tumble integral. Checkpoint playback draws the tumble decision on the motors tab.
 
@@ -81,7 +80,7 @@ uv run python scripts/play_pd.py --task flat
 
 ```bash
 uv run python scripts/play.py --policy checkpoint --task rough-test \
-  --checkpoint research/logs/training/walter_fs_state_machine_rough-test/<run>/model_500.pt
+  --checkpoint logs/rsl_rl/walter_fs_state_machine_rough-test/<run>/model_500.pt
 ```
 
 Smooth tumble uses its own script. The hips hold a flat-ground contact height while the knees spin or settle.
@@ -90,10 +89,23 @@ Smooth tumble uses its own script. The hips hold a flat-ground contact height wh
 uv run python scripts/play_smooth_tumble.py --task rough --viewer viser
 ```
 
-Train the tumble toggle. The script defaults (`--num-envs 8`, `--max-iterations 2`) are a smoke test. They are too short for a policy you would play back. The seed is 42.
+Train the tumble toggle and the tank hip offset. The script defaults (`--num-envs 8`, `--max-iterations 2`) are a smoke test. They are too short for a policy you would play back. The seed is 42.
 
 ```bash
-uv run python scripts/train.py --task rough-test --num-envs 2048 --max-iterations 500
+uv run python scripts/train.py --task rough --num-envs 2048 --max-iterations 2500
+```
+
+The state-machine policy steps at 10 Hz. The PD still retargets at 50 Hz inside that step. On an RTX 5070 Ti with 64 environments, the same simulated time costs about half as much wall time as a 50 Hz policy step. Check a checkpoint on rough-test every 500 updates:
+
+```bash
+uv run python scripts/eval_state_machine.py --controller checkpoint --mode table \
+  --task rough-test --checkpoint logs/rsl_rl/walter_fs_state_machine_rough/<run>/model_500.pt
+```
+
+A scripted climber that tumbles only while the footprint gate is open is the feasibility check. It cleared the 0.22 m inverted stairs and scored above both always-drive and always-tumble:
+
+```bash
+uv run python scripts/eval_state_machine.py --controller oracle --mode probe --device cuda:0
 ```
 
 The 16-D teacher stack:
@@ -105,13 +117,13 @@ uv run python scripts/train.py --teacher --task rough-test --num-envs 2048 --max
 Continue a checkpoint. `--max-iterations` counts additional updates. The new files go in a fresh timestamp directory under the log root.
 
 ```bash
-uv run python scripts/train.py --task rough-test --resume research/logs/training/.../model_500.pt --max-iterations 500
+uv run python scripts/train.py --task rough-test --resume logs/rsl_rl/.../model_500.pt --max-iterations 500
 ```
 
 Scalars land in the run directory. View them with:
 
 ```bash
-uv run tensorboard --logdir research/logs/training
+uv run tensorboard --logdir logs/rsl_rl
 ```
 
 The panel serves play and train controls on localhost and runs one child process at a time:
@@ -127,7 +139,7 @@ Record one rough-test cell (PD teacher, or a 16-D checkpoint on `TeacherStudentE
 ```bash
 uv run python scripts/eval_cells.py --controller pd --cell flat --difficulty medium
 uv run python scripts/eval_cells.py --controller checkpoint --cell pyramid-stairs \
-  --difficulty hard --checkpoint research/logs/training/.../model_500.pt
+  --difficulty hard --checkpoint logs/rsl_rl/.../model_500.pt
 ```
 
 In the Viser **Twist** folder during PD or smooth-tumble playback:
@@ -172,9 +184,9 @@ There is no `.env` file. Behavior comes from CLI flags, `gains.py`, and two envi
 | Task | Scene |
 | --- | --- |
 | `flat` | Infinite plane. The PD task drops terrain height scans. Training puts a scan back so the observation width matches the other scenes. The state machine then replaces that scan with the front and rear grids. |
-| `rough` | mjlab velocity mix with WaLTER caps: pyramid slopes up to 0.45, waves up to 0.12 m, stairs up to 0.12 m. |
-| `rough-test` | Same mix on every third difficulty row, with stair step heights scaled by 1.5. The uniform-noise column is a random grid of cubes. Training starts on row 0. Climb rows spawn on an approach, and leaving a tile does not end the episode. |
-| `stairs` | Flat (15%) plus pyramid and inverse-pyramid stairs (6–18 cm). Outside rough-test, promotion follows travel along the spawn yaw, and 80% of inverse-stair environments stay on the hardest row. |
+| `rough` | State-machine training grid. Stairs run from 0 to 0.22 m over 10 rows. Slopes stay at 0.45 and waves at 0.12 m. A cube column uses the rough-test height cap, a 2 m center platform, and a 1 m apron. `random_rough` scales with the row. Robots spawn at the tile center and keep their column. A row promotes when the root reaches the exit radius, and demotes on a fall, a hard belly hit, or a long episode that never leaves the inner half of that radius. The top row re-rolls. The teacher `rough` task keeps the shared 0.12 m stairs. |
+| `rough-test` | The shared rough mix on every third difficulty row, with stair step heights scaled by 1.5 (hard row 0.18 m). The uniform-noise column is a random grid of cubes. It is the evaluation grid, not the state-machine training grid. Training on it still starts on row 0. A finished or failed climb returns to the column the environment was born on. |
+| `stairs` | Flat (15%) plus pyramid and inverse-pyramid stairs (6–18 cm). The teacher and the 50 Hz tasks promote along the spawn yaw, and 80% of inverse-stair environments stay on the hardest row. |
 
 Play mode (`play=True`, which the play scripts set) uses a very long episode, disables observation noise and pushes, and turns the terrain curriculum off for the run.
 
@@ -185,34 +197,38 @@ Play mode (`play=True`, which the play scripts set) uses a very long episode, di
 | `--task` | `flat` | Same four scenes as playback. |
 | `--num-envs` | `8` | Parallel environments. The panel default is 1024. |
 | `--max-iterations` | `2` | PPO updates. On `--resume`, this is the number of additional updates. |
-| `--teacher` | off | Train the 16-D teacher-student policy. Off selects the tumble toggle. |
+| `--teacher` | off | Train the 17-D teacher-student policy. Off selects the tumble toggle and tank hip. |
 | `--teacher-only-reward` | off | Zero every reward except PD action matching. Requires `--teacher`. With the match weight at 0 this leaves the run with no reward. |
 | `--lin-vel-x-min` / `--lin-vel-x-max` | `0.25` / `1.25` | Forward command bounds, m/s. Cube-root sampling still averages 1 m/s inside the default span. |
 | `--ang-vel-z-min` / `--ang-vel-z-max` | `-1` / `1` | Yaw command bounds, rad/s. 75% of resamples are still zero, and 5% are a full stop. |
 | `--device` | GPU if present | `cuda:0` or `cpu`. |
-| `--log-root` | `research/logs/training` | Directory for new runs. Older `logs/rsl_rl/` checkpoints still load through `--resume`. |
+| `--log-root` | `logs/rsl_rl` | Directory for new runs. Checkpoints load through `--resume` with an explicit path. |
 | `--resume` | none | Checkpoint file. Weights, optimizer, and the iteration counter are restored. |
 
 Log folder names are `walter_fs_state_machine` and `walter_fs_teacher`. Any task other than `flat` appends `_<task>`, for example `walter_fs_state_machine_rough-test`. Checkpoints are `model_<iteration>.pt`, saved every 50 updates.
 
-PPO settings live in `src/walter_rl/rl/ppo.py`: 64 steps per environment, 5 epochs, 4 minibatches, adaptive Adam at `1e-3`, discount `0.99`, GAE `0.95`, entropy coefficient `0.005`, clip `0.2`. The logger is TensorBoard.
+PPO settings live in `src/walter_rl/rl/ppo.py`. The teacher runner steps at 50 Hz, uses 64 steps per environment, entropy coefficient `0.005`, a Gaussian actor, and the same MLP widths as the state machine (actor 256/128/64, critic 512/256/128). It shares the front and rear height grids with the state machine. The state-machine runner steps at 10 Hz, uses 24 steps (2.4 s), entropy `0.003`, and a Beta actor on `[-1, 1]`. Both use 5 epochs, 4 minibatches, adaptive Adam at `1e-3`, discount `0.99`, GAE `0.95`, and clip `0.2`. The logger is TensorBoard. Checkpoints from the old torso-scan teacher runs do not load.
 
 ### State machine
 
-`StateMachineEnv.step` reads `policy_action[:, 0] > 0` as a request to tumble. A rising edge holds tumble on for 0.5 s. A falling edge holds the stored output negative for 0.5 s so a new tumble cannot start. The PD controller then fills hips, knees, wheels, and a zero waist command. Episode reset clears the latch, the dwell counters, and the tumble spin reference.
+The policy action is read once per 0.1 s step. `policy_action[:, 0] > 0` requests tumble. A rising edge holds tumble on for 0.5 s (5 policy steps). A falling edge holds the stored output negative for 0.5 s so a new tumble cannot start. `policy_action[:, 1]` is on `[-1, 1]` and maps to a Tank Mode hip offset from 0° to 30° by `(a + 1) / 2`. Positive points the front hips forward and the rear hips back. Pitch leveling still adds on top of that offset. Tank Mode stays on, and the tank knee command is rewritten to 0 every step. The PD controller then fills hips, knees, wheels, and a zero waist command, five times per policy step, integrating the knee reference at 0.02 s. Episode reset clears the latch, the dwell counters, the tumble spin reference, and the hip offset.
 
-The actor and the critic both see:
+The actor sees:
 
 - `height_scan_front` on the head, yaw-aligned, near edge 0.1 m past the head box
 - `height_scan_rear` on the torso, yaw-aligned, near edge 0.1 m past the torso box
-- `projected_gravity` (actor noise ±0.05)
+- `projected_gravity` (noise ±0.05)
+- `base_ang_vel`, the IMU gyro (noise ±0.2)
+- `hip_pos`, biased hip encoders
+- `knee_sincos`
 - `motor_torques`, actuator force divided by rated torque
 - `command`, the twist
+- `last_policy_action`, the latched toggle and the mapped hip
 - `tumble_applied`, the applied bit over the last 0.5 s, oldest first
 
-Actor scans add uniform noise of ±0.1 before the height is scaled by the 5 m ray length. `StateMachineVecEnv` tells rsl-rl the action dimension is 1. The environment still steps a 16-D PD action.
+The critic sees the same terms without noise, plus body linear velocity, knee and wheel rates, the footprint height profile, a terrain-column one-hot with the normalized row, and the remaining on- and off-dwell. Actor scans add uniform noise of ±0.1 before the height is scaled by the 5 m ray length. `StateMachineVecEnv` tells rsl-rl the action dimension is 2. The environment still steps a 16-D PD action.
 
-Reward weights are the constants at the top of `src/walter_rl/tasks/velocity/config/walter_fs/env_cfgs.py`. Zero-weight terms stay in the table and are skipped at runtime. The live state-machine terms are forward tracking, yaw tracking, uprightness, toggle rate, predictive knee tumble, limb torque, and stuck forward speed. Predictive knee tumble pays for forward knee rate when the front scan still shows a step inside about two columns of the head.
+Reward weights are the constants at the top of `src/walter_rl/tasks/velocity/config/walter_fs/env_cfgs.py`. The `SM_*` constants are the 10 Hz state-machine table. Zero-weight terms stay in the table and are skipped at runtime. Live terms are forward tracking, forward progress, yaw tracking, uprightness, action rate, climb tumble, unneeded tumble, downhill tumble, a light belly-contact penalty, limb torque, and stuck forward speed. Climb tumble pays for forward knee rate while a riser is within 0.35 m ahead of the front axles or still under the wheelbase. The gate is shut at a 4 cm rise and fully open at 8 cm, so a 0.45 slope does not open it. Unneeded tumble charges the latch when no such rise sits between the rear axles and 0.75 m past the front axles. Downhill tumble charges nose-down pitch, in radians, while the latch is on and that same span falls away. A hard belly hit, about 300 N, ends the episode. Lighter contact pays the penalty instead.
 
 ### Teacher stack
 
@@ -276,7 +292,9 @@ gen0WaLTER/
 │   ├── play_smooth_tumble.py
 │   ├── panel.py
 │   ├── eval_cells.py
+│   ├── eval_state_machine.py
 │   └── check_teacher_reward.py
+├── renders/              # MJCF preview images
 ├── src/walter_rl/
 │   ├── assets/
 │   │   ├── motor_models/
@@ -296,14 +314,11 @@ gen0WaLTER/
 │   │   ├── mdp/
 │   │   └── config/walter_fs/env_cfgs.py
 │   └── viewer/
-├── research/
-│   ├── journal/
-│   ├── literature/
-│   └── logs/
+├── logs/rsl_rl/          # PPO checkpoints, TensorBoard, eval cell clips (gitignored)
 └── mjlab/
 ```
 
-`.venv/` is the local uv environment and is omitted above. `research/logs/` holds training runs and cell clips.
+`.venv/` is the local uv environment and is omitted above. `logs/rsl_rl/` holds training runs and cell clips.
 
 ## Component Breakdown
 
@@ -313,15 +328,16 @@ gen0WaLTER/
 - **`scripts/play.py`** — PD playback, or a state-machine checkpoint in Viser or the native viewer.
 - **`scripts/play_pd.py`** — PD playback only.
 - **`scripts/play_smooth_tumble.py`** — Smooth-tumble playback. Hips cancel the knee's ride-height change while tumbling.
-- **`scripts/panel.py`** — Browser panel. Play choices are classical PD, smooth tumble, and a checkpoint. Train choices include the teacher flags and a resume path under `research/logs/training` or `logs/rsl_rl`.
-- **`scripts/eval_cells.py`** — One rough-test cell, 8 s, forward command 1 m/s. Writes a clip and `frames.csv` for the PD teacher or a 16-D checkpoint.
+- **`scripts/panel.py`** — Browser panel. Play choices are classical PD, smooth tumble, and a checkpoint. Train choices include the teacher flags and a resume path under `logs/rsl_rl`.
+- **`scripts/eval_cells.py`** — One rough-test cell, 8 s, forward command 1 m/s. Writes a clip and `frames.csv` for the PD teacher or a teacher checkpoint.
+- **`scripts/eval_state_machine.py`** — Rough or rough-test cells for the 2-D state-machine policy (oracle, checkpoint, or probe/table modes).
 - **`scripts/check_teacher_reward.py`** — Short rollout that compares the teacher action with zeros on the match term.
 - **`SIMULATION.md`** — Path from the MJCF through mjlab and MuJoCo Warp to a DC-motor torque and the PD loops.
-- **`src/walter_rl/rl/state_machine_env.py`** — Latches the 1-D toggle, holds each edge for 0.5 s, and steps the PD action.
+- **`src/walter_rl/rl/state_machine_env.py`** — Latches the tumble toggle, holds each edge for 0.5 s, writes the 0–30° tank hip, and steps the PD action.
 - **`src/walter_rl/rl/teacher_env.py`** — Stores the scan-conditioned PD target, then steps the student or that target.
-- **`src/walter_rl/rl/vecenv.py`** — rsl-rl 5.4 adapter. `StateMachineVecEnv` reports one action.
-- **`src/walter_rl/rl/ppo.py`** — `OnPolicyRunner` dict: separate actor and critic, observation normalization, Gaussian policy.
-- **`src/walter_rl/rl/checkpoint_policy.py`** — Viewer adapter. Reads the `actor` observation group and reports the stored tumble decision.
+- **`src/walter_rl/rl/vecenv.py`** — rsl-rl 5.4 adapter. `StateMachineVecEnv` reports two actions.
+- **`src/walter_rl/rl/ppo.py`** — `OnPolicyRunner` configs: Beta actor for the state machine, Gaussian for the teacher, shared critic widths.
+- **`src/walter_rl/rl/checkpoint_policy.py`** — Viewer adapter. Reads the `actor` observation group and reports the stored tumble decision and tank hip offset.
 - **`src/walter_rl/control/full_body_pd/`** — Pitch, roll, wheel speed, yaw, integral tumble, and the external tumble latch.
 - **`src/walter_rl/control/smooth_tumble/`** — Same loops, with level hips during tumble and settle.
 - **`src/walter_rl/tasks/velocity/config/walter_fs/env_cfgs.py`** — Scene, command, reward, and observation builders, including `walter_fs_state_machine_env_cfg` and `walter_fs_teacher_env_cfg`.
@@ -348,7 +364,7 @@ The code splits into four layers.
 4. Wheels scale `lin_vel_x` so `full_speed_command` requests the motor's maximum wheel rate, add proportional speed error, and add a differential from the yaw-rate loop. The tumble gate replaces that command with `tumble.wheel_speed`.
 5. The waist column is written to zero.
 
-**Learned policy.** `StateMachineEnv` is the default. `TeacherStudentEnv` is the 16-D alternative. `RslRlVecEnvWrapper` presents the mjlab env to rsl-rl 5.4, including timeout bootstrapping. `CheckpointPolicy` matches the viewer protocol (`reset` and `__call__`). Simulation steps run in PyTorch on the device chosen by the script. The native viewer copies one environment's state back to CPU `MjData`. Viser renders through `mjviser`.
+**Learned policy.** `StateMachineEnv` is the default (2-D policy, 10 Hz). `TeacherStudentEnv` is the 17-D alternative (50 Hz). `RslRlVecEnvWrapper` and the specialized vec wrappers present the mjlab env to rsl-rl 5.4, including timeout bootstrapping. `CheckpointPolicy` matches the viewer protocol (`reset` and `__call__`). Simulation steps run in PyTorch on the device chosen by the script. The native viewer copies one environment's state back to CPU `MjData`. Viser renders through `mjviser`.
 
 ## Development Setup
 
@@ -369,7 +385,8 @@ There is no database and no separate compile step. For a headless PD check that 
 This repository has no `tests/` directory and no pytest dependency. Two scripts check pieces of the teacher path by running them:
 
 - `uv run python scripts/check_teacher_reward.py` expects the match term to prefer the teacher action. The reward manager skips the term while `TRACK_TEACHER_WEIGHT` is `0.0`, so the recorded rate stays 0. The script then divides that rate by the same weight and raises `ZeroDivisionError`.
-- `uv run python scripts/eval_cells.py` writes a clip for one rough-test cell. It builds `TeacherStudentEnv`, so a state-machine checkpoint (1-D action, smaller MLP) does not load there. `scripts/play.py --policy checkpoint` is the state-machine player and hard-codes the 256/128/64 MLP.
+- `uv run python scripts/eval_cells.py` writes a clip for one rough-test cell. It builds `TeacherStudentEnv`, so a state-machine checkpoint (2-D action, Beta actor) does not load there. `scripts/play.py --policy checkpoint` is the state-machine player and uses `state_machine_ppo_runner_cfg`.
+- `uv run python scripts/eval_state_machine.py --controller oracle --mode probe` rolls the scripted climber on the top inverted-stair row and compares its return with always-drive and always-tumble. `--mode table` scores every cell of `--task`.
 
 ## Contributing & Future Work
 
@@ -383,11 +400,11 @@ There is no `CONTRIBUTING` guide. A practical change is a focused edit plus a pl
 Limits visible from the current tree:
 
 - `TRACK_TEACHER_WEIGHT` is 0, so teacher matching is configured and then skipped. Turning it back on is an edit in `env_cfgs.py`. The state-machine reward table still names `sensor_name="terrain_scan"` for that term; the match function ignores the argument, and the state machine has already replaced that sensor with the front and rear grids.
-- `scripts/play.py` plays state-machine checkpoints. Teacher checkpoints belong on the 16-D stack in `eval_cells.py`.
+- `scripts/play.py` plays state-machine checkpoints. Teacher checkpoints belong in `eval_cells.py`.
 - `src/walter_rl/tasks/__init__.py` and `src/walter_rl/control/__init__.py` still describe a PD-only package. Training imports the PD controller from `walter_rl.rl`.
 - The root `pyproject.toml` description still says the package is full-body PD playback.
 - `RL Manual.md` is a second manual and still describes the 16-D student as the default, with a teacher match weight of 0.5. This README is the one that matches the code.
-- `research/journal/STATUS.md` records the 2026-10-14 teacher study. Later state-machine runs are the checkpoints under `research/logs/training/walter_fs_state_machine_rough-test/`.
+- State-machine checkpoints live under `logs/rsl_rl/walter_fs_state_machine_*`.
 - `mjlab/src/mjlab/utils/lab_api/math.py` and `mjlab/src/mjlab/utils/spec.py` each contain an upstream note to double-check a quaternion product and a spec helper. Those are inside the vendored library.
 - License, CI, and an automated test suite are not in the tree. Build-status and license badges above are placeholders until those exist.
 
